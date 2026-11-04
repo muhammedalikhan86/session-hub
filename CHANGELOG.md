@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased] - 2026-11-04
 
+Revision 2. Tranche v1, Phase 2.
+
+### feat
+
+- **F-005** `/hub-join <name>`. Joins the Hub under a name.
+  - Checks the name is free. A live name is refused, including `Hub`.
+  - Makes sure `bus.jsonl` exists.
+  - Starts the listener at the log end and waits for it to be ready.
+  - Claims `presence\<name>.json` and re-reads it. If two sessions claim the same name at the same moment, exactly one wins.
+  - Appends a `join` line.
+  - The status line shows the name and role.
+- **F-006** Presence heartbeat, leave and name release.
+  - A presence heartbeat every 10 s. If the name has been taken over, the session unjoins and a toast says so.
+  - `/hub-leave` stops the heartbeat, logs a `leave` line, and deletes the presence file if it is still this session's.
+  - The name is released on session end. `/hub-join` works again after `/clear`.
+  - A crashed session's name is freed after 30 s.
+  - After a mod reload, the heartbeat and status are restored.
+- **F-007** Hub away state for workers. A worker shows `Hub away — waiting` while the Hub's presence is missing or older than 30 s, and returns to normal when the Hub returns. Nothing is stopped while the Hub is away.
+
+### test
+
+- Unit tests for presence, join, listener, heartbeat, leave and hub-watch. The `claude plugin test` count is now 79.
+- Pester join end-to-end test `hub-join.Tests.ps1`, run against the real `bus.ps1`. The Pester count is now 28.
+
+### docs
+
+- Architecture v7 describes the Phase 2 build.
+- 33 new test cases, TC-050..05A, TC-060..06A, TC-070..075, TC-080..084.
+- Test runbook §5 has the manual Phase 2 checks.
+- The README has new sections for `/hub-join`, heartbeat and leave, and Hub away.
+
+### fix
+
+- None this phase.
+
+### Breaking changes
+
+- None.
+
+### Known limits
+
+- A restored session does not listen until F-009.
+
+### Smoke tests
+
+- **Happy path:** `/hub-join <name>` shows the name and role on the status line; `/hub-leave` stops the heartbeat and deletes the presence file.
+- **Edge case:** `/hub-join` with a live name, including `Hub`, is refused; a crashed session's name is freed after 30 s.
+- **Regression-sensitive:** after a mod reload the heartbeat and status are restored; `/hub-join` works again after `/clear`.
+
+## [Revision 1] - 2026-11-04
+
 Tranche v1, Phase 1.
 
 ### feat

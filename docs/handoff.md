@@ -14,7 +14,7 @@
 
 ### Current state
 
-Tranche v1 Phase 1 is complete. The mod loads, `/hub-selftest` passes, and the bus helper can append and tail safely, with a tested message model. The pieces are not yet wired together: `message.ts` is not used by `register.ts` (that happens in F-008/F-009). The plugin code is uncommitted on `main` at 5bf018f; the user commits only on request.
+Tranche v1 Phase 1 is complete. The mod loads, `/hub-selftest` passes, and the bus helper can append and tail safely, with a tested message model. The pieces are not yet wired together: `message.ts` is not used by `register.ts` (that happens in F-008/F-009). The Phase 1 code was later committed and pushed (main at 4f42b4d); the user commits only on request.
 
 ### How to run checks
 
@@ -26,7 +26,7 @@ Tranche v1 Phase 1 is complete. The mod loads, `/hub-selftest` passes, and the b
 
 ### What's next
 
-Phase 2 (Presence) in `docs/project-management.md`: F-005 `/hub-join <name>`, F-006 Heartbeat and leave, F-007 Hub-away state. See that file's Feature Backlog and dependency table for acceptance criteria and order.
+Phase 2 (Presence) was next and is now done; see the Phase 2 section below.
 
 ### Important context
 
@@ -37,3 +37,47 @@ Phase 2 (Presence) in `docs/project-management.md`: F-005 `/hub-join <name>`, F-
 - `claude plugin validate` warns about a missing icon and license; this is a packaging item (F-015).
 - Pester 6.2 is installed (the plan assumed 5).
 - TC-040 needs node; it skips if node is absent.
+
+## Tranche v1 — Phase 2 (Presence): complete (2026-11-04)
+
+### What was done
+
+- **F-005 `/hub-join`, F-006 heartbeat and leave, F-007 Hub away.** Details are in `docs/architecture.md` v7 §4 and `plugin/README.md`. The parts:
+  - `presence.ts`.
+  - `join.ts`: the order is name check, `ensureBusFile`, listener to its first `#pos` (10 s timeout), claim with a 400 ms re-read, then the join line.
+  - `heartbeat.ts`: beats every 10 s. If another session holds the name, `markLost` runs.
+  - `leave.ts`: the order is heartbeat, then watch, then leave line, then listener, then `removeIfOurs`. `endSession` records `endedId`, and the join wait is 500 ms.
+  - `restore.ts`.
+  - `hub-watch.ts`.
+
+### Current state
+
+Phase 1 and Phase 2 are both done. The Phase 2 code is uncommitted. Main is at 4f42b4d (the Phase 1 commits, already pushed). The user commits on `main` only when they ask.
+
+### Lessons from the retries
+
+1. `/clear` fires `session.end` with a new session id and no `session.start`. State must be keyed on the session id, not reset in `session.start`.
+2. `session.end` has a 1.5 s bound.
+3. When an await sits between unjoining and `clearStored`, a new join can slip in. Clear first, then await.
+4. Reviewers sometimes cannot run commands, so the orchestrator should run the gates itself.
+
+### Known gaps
+
+1. After a mod reload a session is not listening until F-009 is built.
+2. A spawned listener cannot be killed directly. It stops at its next output.
+3. LICENSE and author are missing. They matter only for the plugin directory.
+
+### Manual checks still to run
+
+These are in `docs/test-runbook.md` §5: TC-080..084 and TC-06A. They need two signed-in accounts, run with `claude --plugin-dir C:\Users\muhammedali.khan\source\repos\session-hub\plugin`. TC-082 and TC-084 may have to be recorded as not run.
+
+### How to test
+
+- `npx -p typescript tsc -p plugin`
+- `claude plugin validate plugin`
+- `claude plugin test plugin` (79 tests)
+- `pwsh -NoProfile -Command "Invoke-Pester plugin/tests -CI"` (28 tests). Run it serially, not while a hub is running. It needs node 22.18 or later.
+
+### What's next
+
+Phase 3, Messaging: F-008 `send` tool, F-009 listener, F-010 delivery, F-011 Hub authority check. F-009 should also restart the listener on restore, from the stored `listenerPos`.

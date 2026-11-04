@@ -1,7 +1,7 @@
 # Architecture: Session Hub — talking between Claude Code sessions
 
 > Status: APPROVED
-> Version: v6
+> Version: v7
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
 
@@ -49,8 +49,9 @@ flowchart LR
 There is no server. Each session's copy of the mod does four jobs:
 
 1. **Join.** The person runs `/hub-join <name>`. The mod checks the name is free in the presence
-   folder (or refuses), **starts listening at the current end of the log first**, then claims the
-   name and appends a `join` line ("I'm here"). The Hub learns of a new session by reading that
+   folder (or refuses), makes sure `bus.jsonl` exists, **starts listening at the current end of the
+   log first and waits until the listener has reported its first position**, then claims the name and
+   appends a `join` line ("I'm here"). The Hub learns of a new session by reading that
    line, so it can only send to a session that is already listening.
 2. **Send.** The model calls the mod's `send` tool. The mod stamps the sender, the time and an id,
    and appends one line to `bus.jsonl` while holding the bus mutex (ADR-006).
@@ -64,7 +65,10 @@ There is no server. Each session's copy of the mod does four jobs:
 
 Joins and leaves are announced on the log. Liveness is kept apart from it: each session rewrites its
 own small heartbeat file every 10 seconds, and a session whose heartbeat is over 30 s old counts as
-gone even if it never said goodbye. That keeps heartbeats from filling the log forever.
+gone even if it never said goodbye. That keeps heartbeats from filling the log forever. A
+heartbeat that finds another session's id in its own file knows its name was taken over (it was
+idle over 30 s) and unjoins instead of overwriting it; a missing or malformed file holds nobody, so
+the heartbeat recreates it.
 
 ## 3. Components
 
@@ -77,6 +81,15 @@ gone even if it never said goodbye. That keeps heartbeats from filling the log f
   line entry and a pane.
 - **Dependencies:** Bus helper, shared folder, Claude Code mod engine.
 - **Technology:** Claude Code mod (hooks module, TypeScript), see ADR-004, ADR-005.
+- **Parts (all under `plugin/hooks/`), built through Phase 2:** `presence.ts` (name free/stale/claim
+  rules and the race re-read), `join.ts` (the join sequence, with `ensureBusFile` before the listener,
+  plus the join/leave guards and `JoinState`), `listener.ts` (spawns `bus.ps1 tail` and splits
+  lines), `bus-client.ts` and `bus-scripts.ts` (append, ensure-file and remove-file through
+  `$.process.run`), `heartbeat.ts` (10 s presence rewrite), `leave.ts` (release, `endSession`,
+  `completeJoin`, `markLost`), `restore.ts` (take a join back up after a mod reload),
+  `hub-watch.ts` (workers only: is the Hub away) and `register.ts` (wires the commands and
+  `session.start` / `session.end`). What a received line does is F-009 and not built yet: lines
+  reach a handler that only parses them.
 
 ### Bus helper (`bus.ps1`, shipped inside the mod)
 - **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006
@@ -110,8 +123,10 @@ gone even if it never said goodbye. That keeps heartbeats from filling the log f
 ### Presence store (`presence\<name>.json`)
 - **Responsibility:** Who is alive, and who holds which name. One file per session:
   `{ name, sessionId, account, role, startedAt, lastSeen }`.
-- **Technology:** Whole-file writes with `$.fs.write`, reads with `$.fs.list` + `$.fs.read`. See
-  ADR-003.
+- **Technology:** Whole-file writes with `$.fs.write`; reads of one known file with `$.fs.exists` +
+  `$.fs.read` (the name check and the Hub watch each read a single file); removal through the bus
+  helper's `REMOVE_FILE_SCRIPT` (`$.process.run`). A file is deleted only while it still holds this
+  session's id. See ADR-003.
 
 ## 4. Data Flow
 
@@ -181,16 +196,57 @@ stateDiagram-v2
   Joined --> HubAway: Hub's heartbeat older than 30 s
   HubAway --> Joined: Hub heartbeat fresh again
   Joined --> Unjoined: /hub-leave or session ends
+  Joined --> Unjoined: name taken over (heartbeat sees another session)
   HubAway --> Unjoined: /hub-leave or session ends
+  HubAway --> Unjoined: name taken over (heartbeat sees another session)
 ```
 
-- **On join**, in this order: (1) check the name is free, (2) start the listener at the log's
-  current end, (3) claim the name and start the heartbeat, (4) append the `join` line. The Hub adds
-  the session to its list when it reads that line, so anything the Hub sends after that is past the
-  worker's starting offset and cannot be missed. A new session never acts on old orders. It keeps its
-  file id and offset in `$.state` so a mod reload carries on where it was.
-- **Hub away:** a worker keeps doing whatever is already queued, then simply has nothing new to do.
-  Status line says `Hub away — waiting`.
+- **On join**, in this order: (1) check the name is free, (2) `ensureBusFile`: create `bus.jsonl` (and
+  its folder) if missing, because `tail -From end` prints no position until the file exists,
+  (3) start the listener at the log's current end and wait for its first `#pos` line, with a 10 s
+  ready timeout (no position in time fails the join, stops the listener and writes nothing),
+  (4) claim the name (write the presence file, wait 400 ms, re-read; back off if another session's id
+  is there), (5) append the `join` line. Only then does `completeJoin` store the joined identity and
+  start the heartbeat (and, for a worker, the Hub watcher); the presence file was written fresh in
+  step 4, so it cannot go stale in between. Any failure up to the join line stops the listener and
+  removes the presence file, only if it still holds this session. The Hub adds the session to its
+  list when it reads that line, so anything the Hub sends after that is past the worker's starting offset and cannot be
+  missed. A new session never acts on old orders. The latest `#pos` is kept in `$.state`
+  (`listenerPos`) so a mod reload can carry on where it was (see Restore below). The joined identity
+  is kept in `$.state` (`joined`). Only one join runs at a time, and none while already joined.
+- **Heartbeat:** every 10 s the session rewrites its presence file with a fresh `lastSeen`. If the file
+  is missing or malformed it is recreated. If it holds another session's id the name was taken over
+  (for example after the machine slept over 30 s): the heartbeat does not overwrite it, and
+  `markLost` stops the listener and the Hub watcher, unjoins the session, clears the stored join and
+  tells the person to `/hub-join` again. A failing beat is reported once per failure streak.
+- **Leave:** `/hub-leave` is refused when not joined, during a join or during another leave. Order:
+  stop the heartbeat (nothing may refresh `lastSeen` after the name is given up), stop the Hub
+  watcher, append the `leave` line (the listener is still running), stop the listener, then remove
+  the presence file if it is still this session's. If the append or the removal fails the name is
+  still released and the failure is reported (the name frees itself within 30 s).
+- **Session end and `/clear`:** `session.end` runs the same release through `endSession`, best effort
+  inside the exit's 1.5 s bound. It first records `endedId`, the id of the ending session, so that
+  id can no longer join or heartbeat; a join still in progress gets up to 500 ms to settle (one
+  third of the bound, leaving 1 s for the release, whose leave-line append starts a PowerShell
+  process). A join slower than that finishes by itself, sees its own id in `endedId` in
+  `completeJoin`, and releases itself without ever starting a heartbeat. `/clear` ends the session
+  and the process carries on under a new session id **with no `session.start`**; because only the
+  ended id is barred, the new id can `/hub-join` again. A crash or a cut-off needs nothing: the 30 s
+  stale rule frees the name.
+- **Restore after a mod reload:** module variables are lost but `$.state` still says joined. On
+  `session.start`, `restoreJoin` takes the join back up only if the presence file still holds this
+  session's id, matches the stored id and is fresh: it restarts the heartbeat (and the Hub watcher
+  for a worker) and the status line. Otherwise it clears the stored join. **Restarting the listener
+  from the stored `listenerPos` is F-009 and is stubbed**: until then a restored session has a
+  heartbeat and a status line but receives nothing.
+- **Hub away:** a worker (never the Hub) runs the Hub watcher (`hub-watch.ts`): it reads
+  `presence\Hub.json` at start and every 10 s. The Hub is away when the file is missing, unreadable
+  or malformed, or its `lastSeen` is 30 s or older (the same `isLive` rule as the name check). It
+  reports only on a change, and the status line then reads
+  `Session Hub: <name> (worker) — Hub away — waiting`, going back to `Session Hub: <name> (worker)`
+  when the Hub returns. Away is only a flag (`JoinState.hubAway`): nothing is stopped, so a worker
+  keeps doing whatever is already queued, then simply has nothing new to do. The watcher stops
+  wherever the heartbeat stops (leave, session end, lost name).
 - **Clear:** `/hub-clear` (Hub only), under the bus mutex, moves `bus.jsonl` to
   `archive\bus-<UTC timestamp>.jsonl` and starts an empty one. Each listener sees the file id
   change, finishes reading the archived file to its end, then starts the new file from 0, so no
@@ -264,3 +320,4 @@ stateDiagram-v2
 | v4 | 2026-11-04 | Concurrency review: named mutex for writes and clear; readers take only complete lines; clear archives instead of emptying; join order (listen, then announce with a `join` line the Hub reads). ADR-006 supersedes ADR-002 | Triage edit | — |
 | v5 | 2026-11-04 | Changes approved | Gate approval | Muhammed Ali Khan |
 | v6 | 2026-11-04 | Synced with Phase 1 build: `kind` list adds join/leave; risk A7 resolved by F-001; Bus helper inputs/outputs (`-LineBase64`, exit codes, `#pos` lines, `-From end`, file id format); Pester 6.2; session-name rule (1 to 32 of `A-Z a-z 0-9 _ -`); ADR-003 amended: join/leave have their own kinds; Bus helper marks `clear` and clear-following as F-014 | Triage edit | — |
+| v7 | 2026-11-04 | Synced with Phase 2 build (F-005 to F-007): join order now includes `ensureBusFile` and the 10 s listener ready timeout; heartbeat lost-name handling (`markLost`); leave order (heartbeat, Hub watcher, `leave` line, listener, presence file); release on `session.end` with `endedId`, the 500 ms join wait inside the 1.5 s bound, and `/clear` behaviour (no `session.start`); restore after a mod reload with the listener restart deferred to F-009; Hub watcher and its status text; Mod parts list; presence reads use `$.fs.exists` + `$.fs.read` | Triage edit | — |
