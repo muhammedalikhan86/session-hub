@@ -1,31 +1,83 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import { ensureBusFile, helperPath, removeFile } from './bus-client'
+import { appendMessage, ensureBusFile, helperPath, removeFile } from './bus-client'
 import type { RunFn } from './bus-client'
 import { startHeartbeat } from './heartbeat'
 import type { Heartbeat, HeartbeatIdentity } from './heartbeat'
 import { startHubWatch, statusWith } from './hub-watch'
 import type { HubWatch } from './hub-watch'
+import { makeIsFromLiveHub, routeMessage } from './deliver'
+import { createInbox } from './inbox'
+import type { Inbox } from './inbox'
 import { guardedJoin, join } from './join'
 import type { JoinDeps, JoinResult, JoinState } from './join'
 import { completeJoin, endSession, leaveSession, markLost } from './leave'
 import type { LeaveDeps } from './leave'
-import { parseLine } from './message'
 import { resolveSharedFolder } from './paths'
 import { accountFrom, presencePath } from './presence'
 import type { Presence } from './presence'
+import type { ListenerPos } from '../types'
 import { restoreJoin } from './restore'
 import { runSelfTest } from './selftest'
+import { handleSend, SEND_DESCRIPTION, SEND_SCHEMA, SEND_TOOL } from './send'
 
 const NOT_JOINED_STATUS = 'Session Hub: not joined'
 
-// What the next line from the bus does is F-009's to build; for now a line is
-// only parsed.
+const state: JoinState = { joining: false }
+
+// Recreated on every join and restore (its seen ids come from `$.state`).
+let inbox: Inbox | undefined
+
 const handleBusLine = (line: string): void => {
-  void parseLine(line)
+  void inbox?.handle(line)
 }
 
-const state: JoinState = { joining: false }
+const makeInbox = ($: EngineInterface, folder: string, seed: readonly string[]): Inbox => {
+  const isFromLiveHub = makeIsFromLiveHub({
+    read: async path => {
+      if (!(await $.fs.exists(path))) return undefined
+
+      const text = await $.fs.read(path)
+
+      return typeof text === 'string' ? text : undefined
+    },
+    now: () => Date.now(),
+    hubPath: presencePath(folder, 'Hub'),
+  })
+
+  return createInbox(
+    {
+      me: () =>
+        state.joined && {
+          name: state.joined.presence.name,
+          sessionId: state.joined.presence.sessionId,
+        },
+      joining: () => state.joining,
+      storePos: pos => $.state.set({ plugin: 'session-hub', key: 'listenerPos' }, pos),
+      persist: ids => $.state.set({ plugin: 'session-hub', key: 'seenIds' }, ids),
+      // Returned, so the inbox keeps order across the Hub check's file read.
+      onMessage: message =>
+        routeMessage(message, {
+          me: () =>
+            state.joined && {
+              name: state.joined.presence.name,
+              role: state.joined.presence.role,
+            },
+          submit: text => $.prompt.submit({ text }),
+          notify: text => $.ui.toast(`Session Hub: ${text}`),
+          log: text => $.ui.log(text, { to: 'debug' }),
+          isFromLiveHub,
+        }),
+      log: text => $.ui.log(text, { to: 'debug' }),
+    },
+    seed,
+  )
+}
+
+// Through the inbox's chain: a position is stored only after its batch's lines were handled.
+const onPos = (pos: ListenerPos): void => {
+  void inbox?.position(pos)
+}
 
 const storeJoined = (
   $: EngineInterface,
@@ -46,8 +98,11 @@ const storeJoined = (
       : null,
   )
 
+// The position and seen ids belong to one join: they go with it.
 const clearStored = ($: EngineInterface) => async (): Promise<void> => {
   await storeJoined($, null)
+  await $.state.set({ plugin: 'session-hub', key: 'listenerPos' }, null)
+  await $.state.set({ plugin: 'session-hub', key: 'seenIds' }, [])
 }
 
 // A beat's failure is reported once per streak (the heartbeat guarantees it);
@@ -145,6 +200,13 @@ export const register: Register = on => {
       name: 'hub-leave',
       description: 'Leave Session Hub and free this session\'s name',
     })
+    // Registered at session start (the earliest it is accepted); a call while
+    // unjoined is refused by handleSend.
+    await $.tool.register({
+      name: SEND_TOOL,
+      description: SEND_DESCRIPTION,
+      inputSchema: SEND_SCHEMA,
+    })
 
     // After a mod reload `$.state` still says we are joined; a fresh session has
     // nothing stored. Never lets a failure here break session start.
@@ -155,8 +217,19 @@ export const register: Register = on => {
       })
 
       const folder = await resolveSharedFolder($)
+      const pos = await $.state.get({ plugin: 'session-hub', key: 'listenerPos' })
+      const ids = await $.state.get({ plugin: 'session-hub', key: 'seenIds' })
+
+      inbox = makeInbox($, folder, Array.isArray(ids.value) ? ids.value : [])
 
       await restoreJoin(state, value, {
+        spawn: request => $.process.spawn(request),
+        helper: helperPath($.plugin.root),
+        busPath: `${folder}\\bus.jsonl`,
+        storedPos: pos.value,
+        waitMs: ms => $.clock.sleep(ms),
+        onLine: handleBusLine,
+        onPos,
         read: async path => {
           if (!(await $.fs.exists(path))) return undefined
 
@@ -209,6 +282,26 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The cast: the generated tool names list only built-in and connected MCP tools.
+  on('tool.call', { tool: `mcp__session-hub__${SEND_TOOL}` as never }, async ($, e) => {
+    const run: RunFn = (argv, init) => $.process.run(argv, init)
+    const input = e as { to?: unknown; body?: unknown; replyTo?: unknown }
+
+    return handleSend(input, {
+      state,
+      sessionId: () => $.session.id(),
+      now: () => Date.now(),
+      random: Math.random,
+      append: async message =>
+        appendMessage(
+          run,
+          helperPath($.plugin.root),
+          `${await resolveSharedFolder($)}\\bus.jsonl`,
+          message,
+        ),
+    })
+  })
+
   on('command.run', { command: 'hub-selftest' }, async $ => {
     const result = await runSelfTest($)
 
@@ -247,36 +340,48 @@ export const register: Register = on => {
         spawn: request => $.process.spawn(request),
         run,
         onLine: handleBusLine,
-        onPos: pos => {
-          void $.state.set({ plugin: 'session-hub', key: 'listenerPos' }, pos)
-        },
+        onPos,
       }
 
-      const joined = await join(deps, name)
+      // A fresh join starts at `end`: nothing stored by an earlier join applies.
+      inbox = makeInbox($, folder, [])
+      await clearStored($)().catch(() => {})
 
-      if (joined.ok) {
-        // Inside the guard, so a /hub-leave can never find a joined state
-        // without its heartbeat, and a session.end during the join is honoured.
-        const p = joined.joined.presence
-        const path = presencePath(folder, p.name)
-        const isKept = await completeJoin(state, joined.joined, await leaveDeps($), {
-          store: () => storeJoined($, p, path),
-          clearStored: clearStored($),
-          startHeartbeat: () =>
-            beat($, {
-              name: p.name,
-              sessionId: p.sessionId,
-              account: p.account,
-              startedAt: p.startedAt,
-              path,
-            }),
-          startHubWatch: () => watchHub($, folder, p),
-        })
+      const myInbox = inbox
+      let kept = false
 
-        if (!isKept) return { ok: false, reason: 'the session ended during the join' }
+      try {
+        const joined = await join(deps, name)
+
+        if (joined.ok) {
+          // Inside the guard, so a /hub-leave can never find a joined state
+          // without its heartbeat, and a session.end during the join is honoured.
+          const p = joined.joined.presence
+          const path = presencePath(folder, p.name)
+
+          kept = await completeJoin(state, joined.joined, await leaveDeps($), {
+            store: () => storeJoined($, p, path),
+            clearStored: clearStored($),
+            startHeartbeat: () =>
+              beat($, {
+                name: p.name,
+                sessionId: p.sessionId,
+                account: p.account,
+                startedAt: p.startedAt,
+                path,
+              }),
+            startHubWatch: () => watchHub($, folder, p),
+          })
+
+          if (!kept) return { ok: false, reason: 'the session ended during the join' }
+        }
+
+        return joined
+      } finally {
+        // Lines held during the join are delivered if it held, dropped if it did not.
+        if (kept) await myInbox?.release()
+        else myInbox?.discard()
       }
-
-      return joined
     })
 
     if (!result.ok) return { text: `Join refused: ${result.reason}` }
