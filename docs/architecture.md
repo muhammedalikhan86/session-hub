@@ -1,7 +1,7 @@
 # Architecture: Session Hub — talking between Claude Code sessions
 
 > Status: APPROVED
-> Version: v7
+> Version: v8
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
 
@@ -57,11 +57,13 @@ There is no server. Each session's copy of the mod does four jobs:
    and appends one line to `bus.jsonl` while holding the bus mutex (ADR-006).
 3. **Listen.** A helper process polls `bus.jsonl` about once a second from its own byte offset and
    streams each complete new line to the mod. It never relies on change notifications, so it cannot
-   miss a line, and it never hands over a half-written one. The mod keeps only lines addressed to its
-   own name or to `*`, and drops its own.
+   miss a line, and it never hands over a half-written one. The mod (`inbox.ts`) keeps only lines
+   addressed to its own name or to `*`, and drops its own, repeats (same `id`) and lines that are not
+   valid JSON messages (logged, skipped).
 4. **Act.** A valid order from the Hub, or a reply to the Hub, becomes a new prompt in the session
-   (`$.prompt.submit`). It starts a turn when the session is idle, or waits its turn if busy.
-   Anything else is shown to the person as a notice only.
+   (`$.prompt.submit`), framed by the mod (`deliver.ts`). It starts a turn when the session is idle, or
+   waits its turn if busy. Anything else is shown to the person as a notice only. An order is acted
+   on only if it passes the authority check (see "Delivery and the Hub authority check" below).
 
 Joins and leaves are announced on the log. Liveness is kept apart from it: each session rewrites its
 own small heartbeat file every 10 seconds, and a session whose heartbeat is over 30 s old counts as
@@ -81,15 +83,18 @@ the heartbeat recreates it.
   line entry and a pane.
 - **Dependencies:** Bus helper, shared folder, Claude Code mod engine.
 - **Technology:** Claude Code mod (hooks module, TypeScript), see ADR-004, ADR-005.
-- **Parts (all under `plugin/hooks/`), built through Phase 2:** `presence.ts` (name free/stale/claim
+- **Parts (all under `plugin/hooks/`), built through Phase 3:** `presence.ts` (name free/stale/claim
   rules and the race re-read), `join.ts` (the join sequence, with `ensureBusFile` before the listener,
   plus the join/leave guards and `JoinState`), `listener.ts` (spawns `bus.ps1 tail` and splits
   lines), `bus-client.ts` and `bus-scripts.ts` (append, ensure-file and remove-file through
   `$.process.run`), `heartbeat.ts` (10 s presence rewrite), `leave.ts` (release, `endSession`,
   `completeJoin`, `markLost`), `restore.ts` (take a join back up after a mod reload),
-  `hub-watch.ts` (workers only: is the Hub away) and `register.ts` (wires the commands and
-  `session.start` / `session.end`). What a received line does is F-009 and not built yet: lines
-  reach a handler that only parses them.
+  `hub-watch.ts` (workers only: is the Hub away), `send.ts` (the `send` tool: `handleSend`, schema,
+  description), `inbox.ts` (the listener filter: seen ids, hold buffer during a join, ordered
+  position store), `deliver.ts` (`routeMessage`: frames and notices; `makeIsFromLiveHub`: the
+  authority check) and `register.ts` (wires the commands, the `send` tool at `session.start`, the
+  `tool.call` hook for it, and `session.start` / `session.end`). Shared types for the stored state
+  (`seenIds`, `listenerPos`) are in `plugin/types/index.d.ts`.
 
 ### Bus helper (`bus.ps1`, shipped inside the mod)
 - **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006
@@ -164,7 +169,7 @@ sequenceDiagram
   H->>BUS: append {from: Hub, fromSession, to: Reports, kind: order, ...}
   BUS-->>W: tail streams the new line
   W->>W: for me? from the live Hub? not seen before?
-  W->>WM: $.prompt.submit("[Hub order #id] run the tests")
+  W->>WM: $.prompt.submit("[Hub order #id to Reports] run the tests" + reply hint line)
   Note over WM: runs as soon as Reports is idle
   WM->>W: send(body: "12 passed, 1 failed")
   W->>BUS: append {from: Reports, to: Hub, kind: reply, replyTo: id}
@@ -181,8 +186,50 @@ sequenceDiagram
 | Already seen (same `id`) | Ignore |
 | `order` to me or `*`, from the live Hub | Queue it as a prompt (acts right away) |
 | `order` from anyone else | Notice to the person only. Never queued (US-10) |
-| `reply` to me, and I am the Hub | Queue it as a prompt |
+| `reply` to me, and I am the Hub | Queue it as a prompt: `[Reply from <from> to #<replyTo>] <body>`, or `[Message from <from>] <body>` when `replyTo` is absent |
+| `reply` to a worker | Notice to the person only |
 | `info` to me or `*` | Notice to the person only |
+| `join` / `leave` | Notice in the Hub; debug log only in a worker |
+
+### The `send` tool
+
+The model's tool is `mcp__session-hub__send` with one schema: `body` (required), `to` and `replyTo`
+(optional). It is registered at `session.start` (the earliest registering is accepted) and handled by
+the `tool.call` hook through `handleSend`. A call while not joined is refused, so nothing has to be
+registered or removed on join and leave. The mod stamps `id`, `ts`, `from`, `fromSession` (read at
+call time, so `/clear` is followed) and `kind`; anything the model supplies for these is ignored. In
+the Hub, `kind` is `order` and `to` must be a session name or `*` (not `Hub` itself). In a worker, `to`
+is always `Hub`, `kind` is `reply` and `replyTo` is passed through when given. The line is appended
+through `bus.ps1 append`; a refusal or a failed append (any non-zero exit: 1, 2 or 3) returns an error starting "Not
+sent" to the model, and success returns the message id. The tool description tells the model never to
+send secrets. The tool is not marked `isDeferred`, so the model finds it through its tool search.
+
+### Delivery and the Hub authority check
+
+- **Frames** (`routeMessage`): a worker's valid order is submitted as
+  `[Hub order #<id> to <my name>] <body>` followed by a line `(reply with the send tool, replyTo "<id>")`;
+  the Hub's replies are framed as in the table above. The body is appended untouched after a frame
+  the mod writes, so a body that imitates a frame only ever appears after the real one. A message
+  that arrives after the session has left is dropped. A `submit` rejection is logged and toasted,
+  never retried; the id stays seen (a possibly lost order is preferred to a duplicate run).
+- **Authority** (`makeIsFromLiveHub`, F-011, ADR-005): an `order` is acted on only if `from` is `Hub`,
+  `presence\Hub.json` is readable, well formed and fresh (under 30 s, the same `isLive` rule), and its
+  `sessionId` equals the line's `fromSession`. Anything else (a missing, malformed, stale or
+  unreadable file, a different session id, any other sender) shows a notice and queues nothing. After
+  the file read the session's name is checked again, so an order is dropped if the session left or
+  re-joined under another name meanwhile.
+- **Ordering:** the inbox awaits each message's delivery (including the Hub file read) before the
+  next line, so orders are submitted in arrival order.
+
+### The listener's state
+
+`inbox.ts` keeps the last 500 seen ids and the latest `#pos` in `$.state` (`seenIds`, `listenerPos`).
+Ids are persisted before the message is delivered, so a replay after a reload delivers nothing twice
+(FR-015). While `/hub-join` is still completing, the name is not yet known: lines are held in arrival
+order (at most 500) and, when the join completes, run through the filter before any later line; if
+the join fails they are discarded. A `#pos` is stored through the same ordered queue, only after the
+lines of its batch were persisted and delivered, and never past held lines. Both keys are cleared on
+every `/hub-join` and on leave, so one join's position never serves another.
 
 ### Joining and the Hub going away
 
@@ -236,9 +283,10 @@ stateDiagram-v2
 - **Restore after a mod reload:** module variables are lost but `$.state` still says joined. On
   `session.start`, `restoreJoin` takes the join back up only if the presence file still holds this
   session's id, matches the stored id and is fresh: it restarts the heartbeat (and the Hub watcher
-  for a worker) and the status line. Otherwise it clears the stored join. **Restarting the listener
-  from the stored `listenerPos` is F-009 and is stubbed**: until then a restored session has a
-  heartbeat and a status line but receives nothing.
+  for a worker) and the status line. Otherwise it clears the stored join. The listener is restarted
+  from the stored `listenerPos` (from `end` when nothing is stored), with the stored seen ids, so a
+  reload neither replays nor skips lines. If that listener cannot start or reports no position within
+  the ready timeout, the join and heartbeat stay and the status line says so.
 - **Hub away:** a worker (never the Hub) runs the Hub watcher (`hub-watch.ts`): it reads
   `presence\Hub.json` at start and every 10 s. The Hub is away when the file is missing, unreadable
   or malformed, or its `lastSeen` is 30 s or older (the same `isLive` rule as the name check). It
@@ -321,3 +369,4 @@ stateDiagram-v2
 | v5 | 2026-11-04 | Changes approved | Gate approval | Muhammed Ali Khan |
 | v6 | 2026-11-04 | Synced with Phase 1 build: `kind` list adds join/leave; risk A7 resolved by F-001; Bus helper inputs/outputs (`-LineBase64`, exit codes, `#pos` lines, `-From end`, file id format); Pester 6.2; session-name rule (1 to 32 of `A-Z a-z 0-9 _ -`); ADR-003 amended: join/leave have their own kinds; Bus helper marks `clear` and clear-following as F-014 | Triage edit | — |
 | v7 | 2026-11-04 | Synced with Phase 2 build (F-005 to F-007): join order now includes `ensureBusFile` and the 10 s listener ready timeout; heartbeat lost-name handling (`markLost`); leave order (heartbeat, Hub watcher, `leave` line, listener, presence file); release on `session.end` with `endedId`, the 500 ms join wait inside the 1.5 s bound, and `/clear` behaviour (no `session.start`); restore after a mod reload with the listener restart deferred to F-009; Hub watcher and its status text; Mod parts list; presence reads use `$.fs.exists` + `$.fs.read` | Triage edit | — |
+| v8 | 2026-11-04 | Synced with Phase 3 build (F-008 to F-011): the `send` tool (registration, stamping, Hub versus worker rules, errors); listener filter, seen ids, hold buffer during a join and ordered position store; delivery frames and notices; Hub authority check against a fresh `presence\Hub.json`; delivery order; restore now restarts the listener from `listenerPos`; Parts list extended | Triage edit | — |

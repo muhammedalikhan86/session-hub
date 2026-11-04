@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased] - 2026-11-04
 
+Revision 3. Tranche v1, Phase 3.
+
+### feat
+
+- **F-008** `send` tool (`mcp__session-hub__send`). The model sends with `body` (required), `to` and `replyTo` (optional). The mod stamps `id`, `ts`, `from`, `fromSession` and `kind`.
+  - In the Hub, an `order` goes to a name or `*`.
+  - In a worker, a `reply` always goes to `Hub`, with `replyTo` optional.
+  - Refused when not joined.
+  - The tool description tells the model never to send secrets.
+- **F-009** Listener filter. Keeps lines for this name or `*`. Drops its own lines, other names, repeats and non-JSON lines.
+  - Seen ids (last 500) and the read position are kept in `$.state`, so a mod reload neither replays nor skips.
+  - Lines that arrive while `/hub-join` completes are held, then delivered in order.
+  - A restored session restarts its listener from the stored position.
+- **F-010** Delivery.
+  - A Hub order becomes `[Hub order #<id> to <name>] <body>` via `$.prompt.submit`.
+  - In the Hub, a reply becomes `[Reply from <from> to #<replyTo>] <body>`. An unprompted worker message becomes `[Message from <from>] <body>`.
+  - Join, leave, info and ignored lines are toasts the model does not read.
+  - A message that arrives after leaving is dropped.
+- **F-011** Hub authority check. An order is acted on only if `from` is `Hub` and `fromSession` matches the session id in a fresh (under 30 s) `presence\Hub.json`.
+  - A forged `from: Hub` line is a toast, never queued.
+  - Messages are delivered in arrival order.
+
+### test
+
+- Unit tests for send, inbox, restore and delivery. The `claude plugin test` count is now 138.
+- Pester count is 28.
+
+### docs
+
+- Architecture v8 describes the Phase 3 build.
+- Test cases TC-090..TC-0D9.
+- Test runbook §6 has the manual Phase 3 checks.
+- The README is updated.
+
+### fix
+
+- None this phase.
+
+### Breaking changes
+
+- None.
+
+### Known limits
+
+- Live behaviour is not yet proven: delivery within 5 s, an idle session waking, and the model obeying a framed prompt (PM-003, test runbook §6).
+- The `send` tool is not deferred-loaded, so the model may need its tool search to find it.
+- The `register.ts` wiring has no unit test.
+
+### Smoke tests
+
+- **Happy path:** the Hub sends a joined worker an order with `send`; the worker receives it as `[Hub order #<id> to <name>] <body>` and the reply comes back as `[Reply from <name> to #<id>] <body>`.
+- **Edge case:** a line with `from: Hub` that does not match a fresh `presence\Hub.json` session id is shown as a toast and never queued; `send` is refused when not joined.
+- **Regression-sensitive:** after a mod reload the listener neither replays nor skips lines; a session restored from storage resumes from the stored read position.
+
+## [Revision 2] - 2026-11-04
+
 Revision 2. Tranche v1, Phase 2.
 
 ### feat

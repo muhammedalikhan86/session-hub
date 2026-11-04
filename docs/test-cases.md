@@ -1,7 +1,7 @@
 # Test Cases: Session Hub
 
-> Scope: Tranche v1, Phases 1 and 2 (F-001 to F-007). Later phases add their scenarios when they start.
-> PMBook: docs/project-management.md (v13)
+> Scope: Tranche v1, Phases 1 to 3 (F-001 to F-011). Later phases add their scenarios when they start.
+> PMBook: docs/project-management.md (v19)
 
 Each scenario is concrete and runnable. "Auto" = covered by an automated test; "Manual" = a person
 must watch for it (permission prompts, mod enablement).
@@ -89,7 +89,7 @@ the real `bus.ps1`.
 | TC-066 | Session end releases the name | `session.end` while joined | Same release, run once; a second end does nothing | Auto (`leave.test.ts` "session end: the same release, run once…") |
 | TC-067 | Session end during a join | `session.end` while a join is pending | A join settling within 500 ms is released once; a slower join releases itself when it completes and never starts a heartbeat | Auto (`leave.test.ts` "session end during a pending join…", "session end waits for a join that settles within the bound…", "a join under s1 still pending after end s1 has returned…") |
 | TC-068 | `/clear` then join again | `session.end` for id A, then `/hub-join` under id B (no `session.start`) | B joins and gets a heartbeat; A is still refused | Auto (`leave.test.ts` "session.end (clear, id A) then a join under id B succeeds", "session.end id A then a join under id A is refused", "end A, then a join under B completes through completeJoin…", "a join under B pending when end A runs is kept…"). Real `/clear`: see TC-081 |
-| TC-069 | Restore after a mod reload | `session.start` with a stored join: fresh file of ours; stale, foreign or missing file; nothing stored or already joined | Heartbeat and status restored / stored join dropped / nothing done. The listener is **not** restarted (F-009) | Auto (`leave.test.ts` "reload: …", 3 tests). Real reload: see TC-082 |
+| TC-069 | Restore after a mod reload | `session.start` with a stored join: fresh file of ours; stale, foreign or missing file; nothing stored or already joined | Heartbeat and status restored / stored join dropped / nothing done. The listener is restarted from the stored position (TC-0AA) | Auto (`leave.test.ts` "reload: …", 3 tests). Real reload: see TC-082 |
 | TC-06A | Crash frees the name | Kill a joined session | Name is free for another session after 30 s (nobody refreshes `lastSeen`) | Manual. The stale rule itself is covered by TC-053 |
 
 ## F-007 — Hub away
@@ -111,6 +111,91 @@ These need real Claude Code sessions in separate accounts, which an automated ru
 |----|----------|-------|----------|-----|
 | TC-080 | Two accounts join | In account A run `/hub-join Hub`; in account B run `/hub-join Reports`; try `/hub-join Hub` from a third session, and the same name from two sessions at the same moment | Status lines read `Session Hub: Hub (Hub)` and `Session Hub: Reports (worker)`; a live name is refused; exactly one of two simultaneous claims wins; no permission prompt in any session | Manual (not yet run) |
 | TC-081 | `/clear` | In a joined session run `/clear`, then `/hub-join <name>` | The old name is released (a `leave` line, presence file removed) and the join works under the new session id | Manual (not yet run) |
-| TC-082 | Mod reload | Join, reload the mod, check the status line and `presence\<name>.json` | Heartbeat and status line come back; `lastSeen` keeps moving; nothing is received until F-009 | Manual (not yet run) |
+| TC-082 | Mod reload | Join, reload the mod, check the status line and `presence\<name>.json` | Heartbeat and status line come back; `lastSeen` keeps moving; the listener is running again (receiving after a reload is TC-0D7) | Manual (not yet run) |
 | TC-083 | Hub away in the real status bar | With the Hub joined and a worker joined, close the Hub session; wait over 30 s; rejoin the Hub | The worker's status line shows `Hub away — waiting`, then returns to normal; the worker stays joined | Manual (not yet run) |
 | TC-084 | Taken-over name | Join, suspend the machine (or stop the heartbeat) for over 30 s, let another session claim the name, resume | The first session unjoins with a toast saying to `/hub-join` again, and does not overwrite the new holder's file | Manual (not yet run) |
+
+## F-008 — `send` tool
+
+"Auto" = `plugin/hooks/send.test.ts`, run by `claude plugin test plugin` (the mod's calls are replaced by fakes). The tool's registration and `tool.call` wiring in `register.ts` have no unit test; they are only proven by TC-09A.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-090 | Not joined | Call `send` before `/hub-join` | Refused; nothing appended | Auto (`send.test.ts` "unjoined is refused and nothing is appended") |
+| TC-091 | Hub sends an order | In the Hub, `send` with `to` a name and a body | One line appended with `kind: order`; `id`, `ts`, `from`, `fromSession` come from the mod, not from the model | Auto ("Hub sends an order to a name; stamps come from the mod") |
+| TC-092 | Hub broadcast | In the Hub, `send` with `to: "*"` | Appended as an order to `*` | Auto ("Hub can broadcast with *") |
+| TC-093 | Bad or self target | In the Hub, `to` empty, invalid or `Hub` | Refused; nothing appended | Auto ("Hub with a bad or self \"to\" is refused") |
+| TC-094 | Worker always writes to the Hub | In a worker, `send` with any `to` | Appended with `to: Hub`, `kind: reply` | Auto ("worker always replies to Hub whatever \"to\" says") |
+| TC-095 | `replyTo` passed through | In a worker, `send` with `replyTo` | The line carries that `replyTo` | Auto ("worker passes replyTo through when given") |
+| TC-096 | Bad body | Empty or non-string `body` | Refused | Auto ("empty or non-string body is refused") |
+| TC-097 | Multi-line body | `body` with a newline | Sent as one bus line (newline escaped) | Auto ("a body with a newline is sent") |
+| TC-098 | Append failure | The bus helper fails (any non-zero exit: 1, 2 or 3) | An error starting "Not sent" goes back to the model, never a success text | Auto ("an append failure is an error, never a success text") |
+| TC-099 | No secrets | Read the tool description | It tells the model never to send secrets (NFR-006) | Auto ("the description tells the model never to send secrets") |
+| TC-09A | Registered and callable in a real session | In a joined session ask the model to send a message; check `bus.jsonl` | The model finds `mcp__session-hub__send` (it is not `isDeferred`, so it must find it through its tool search), the call raises no permission prompt, and the line appears in `bus.jsonl` | Manual (not yet run). Covers the `register.ts` wiring |
+
+## F-009 — Listener
+
+"Auto" = `plugin/hooks/inbox.test.ts` and `plugin/hooks/restore.test.ts`, run by `claude plugin test plugin`.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0A0 | Bad line skipped | A line that is not a JSON message, then a good one | The bad one is logged and skipped; the good one is delivered | Auto (`inbox.test.ts` "an unparseable line is logged and skipped…") |
+| TC-0A1 | Own lines dropped | A line from my name, or with my session id | Dropped | Auto ("own lines are dropped, by name and by fromSession") |
+| TC-0A2 | Addressing | A line to another name; to me; to `*` | Other name dropped; mine and `*` delivered | Auto ("a line to another name is dropped; to me and to * are delivered") |
+| TC-0A3 | Repeat dropped | The same `id` twice | Delivered once | Auto ("a duplicate id is delivered once") |
+| TC-0A4 | Seen ids persisted first, and bounded | Deliver lines; add 501 ids | Ids are stored in `$.state` before `onMessage` runs; the oldest is evicted past 500 | Auto ("the seen ids are persisted before onMessage runs", "the seen set is bounded…") |
+| TC-0A5 | Replay after a reload | Restore the seen ids and feed a batch already seen | Nothing is delivered twice | Auto ("replay after a reload: restored seen ids stop a repeated batch") |
+| TC-0A6 | Name read at line time | Lines arrive while not joined, or after a name change | Nothing delivered while not joined; the current name is used | Auto ("the name is read at line time, and nothing is delivered when not joined") |
+| TC-0A7 | Failures never escape; order kept | A persist or `onMessage` throws or rejects; a slow `onMessage` | Nothing thrown; later lines still flow; line 2 is delivered only after line 1 finished | Auto ("a failing persist or onMessage never throws…", "a slow onMessage for line 1 still finishes before line 2…", "a rejecting onMessage is logged…") |
+| TC-0A8 | Lines held during a join | Lines for my name or `*` arrive before `/hub-join` completes | Held in order (at most 500, oldest dropped); delivered after the join completes, ahead of any later line; discarded if the join fails; dropped, not held, when no join is in progress | Auto ("lines … that arrive before the join completes are delivered after it, in order…", "a later line is still ordered after held lines…", "held lines are discarded…", "lines are dropped, not held, when no join is in progress", "the hold buffer is bounded…") |
+| TC-0A9 | Position stored in order | `#pos` after a batch | Stored only after that batch's lines were persisted and delivered; waits for a slow persist; never past held lines; dropped if the join fails | Auto ("a position is stored after its batch…", "a position still waits for a slow persist", "no position is stored past held lines…", "a held position is dropped when the join fails", "a position that arrives after the name is known but before the held lines are processed waits for them") |
+| TC-0AA | Restore restarts the listener | `session.start` with a stored join and a stored `listenerPos`; with none; a listener that fails or never reports a position; leave after restore | Listener starts from the stored position (or `end`); a failure keeps the join and heartbeat and says so in the status; leave stops the restored listener | Auto (`restore.test.ts`, 5 tests). A real reload: see TC-082 and TC-0D7 |
+| TC-0AB | Listener wired in a real session | Join two sessions and send a message | The receiver sees it. Needs the `register.ts` wiring (no unit test) | Manual: see TC-0D0 |
+
+## F-010 — Delivery
+
+"Auto" = `plugin/hooks/deliver.test.ts`, run by `claude plugin test plugin`. The tests use a fake `submit`: that a real session wakes, starts a turn and acts on the prompt is proven only by a live run (TC-0D4, TC-0D5, TC-0D6).
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0B0 | Worker gets an order | A valid Hub order to a worker | Submitted exactly as `[Hub order #<id> to <name>] <body>` plus a reply-hint line (`replyTo "<id>"`) | Auto ("a worker queues an order from the Hub with the exact frame") |
+| TC-0B1 | Broadcast order | A valid Hub order to `*` | Framed with this worker's own name | Auto ("a worker names itself in a broadcast order") |
+| TC-0B2 | Left meanwhile | The message arrives after the session left | Dropped: not submitted, not noticed | Auto ("a message arriving after the session left is dropped…") |
+| TC-0B3 | Worker gets a reply | A `reply` arrives at a worker | A notice only, never submitted | Auto ("a worker receiving a reply gets a notice, never a submit") |
+| TC-0B4 | Hub gets a reply | A worker reply with `replyTo` | Submitted as `[Reply from <from> to #<replyTo>] <body>` | Auto ("the Hub queues a reply with the replyTo id") |
+| TC-0B5 | Unprompted worker message | A worker line to the Hub with no `replyTo` | Submitted as `[Message from <from>] <body>` | Auto ("the Hub queues an unprompted worker message in its own frame") |
+| TC-0B6 | Join and leave | A `join` or `leave` line | A notice in the Hub, only a debug log in a worker; nothing submitted | Auto ("the Hub gets join and leave as notices…", "a worker only logs join and leave") |
+| TC-0B7 | Info and Hub-side order | An `info` line; an `order` arriving at the Hub | A notice; never submitted | Auto ("info is a notice, never submitted", "an order arriving at the Hub is a notice, never submitted") |
+| TC-0B8 | Submit rejected | `submit` rejects | Logged and toasted; the next message is still delivered; no retry | Auto ("a submit rejection is logged and noticed…") |
+| TC-0B9 | Body untouched | A body with newlines or a forged frame | Appended after the real frame unchanged | Auto ("the body passes through unchanged, newlines and a forged frame included") |
+
+## F-011 — Hub authority check
+
+"Auto" = `plugin/hooks/deliver.test.ts` (`makeIsFromLiveHub` and its use in `routeMessage`).
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0C0 | Only Hub may order | An order from a name other than `Hub`, even with the session id of the live Hub | Notice; never submitted | Auto ("an order that is not from the live Hub is a notice…", "the real check refuses an order not from Hub even when the session id matches") |
+| TC-0C1 | Forged Hub line | `from: Hub` with a session id that differs from `presence\Hub.json` | Notice; never submitted | Auto ("a hand-written line claiming from Hub with another session id…") |
+| TC-0C2 | Freshness boundary | Hub presence 30 s or older; just under 30 s | Not trusted; trusted | Auto ("a stale Hub presence (30 s or older) is not trusted", "a Hub presence just under 30 s old is trusted") |
+| TC-0C3 | Bad Hub file | Missing, malformed or unreadable `Hub.json` | Not trusted | Auto ("a missing…", "a malformed…", "an unreadable Hub presence file is not trusted") |
+| TC-0C4 | Session changes during the check | The session leaves, or re-joins under another name, while the file is read | The order is dropped (not submitted, not noticed) | Auto ("a session that leaves during the Hub check…", "a session that re-joins under another name during the Hub check…") |
+| TC-0C5 | Check fails | The Hub check itself throws | Logged; the order is not queued | Auto ("a failing Hub check is logged and the order is not queued") |
+| TC-0C6 | Forged line in a real session | Append a hand-written `from: Hub` line with `bus.ps1 append` | The worker shows a notice and does nothing | Manual (not yet run): see TC-0D3 |
+
+## Phase 3 integration (F-008 + F-009 + F-010 + F-011 together)
+
+No automated test runs two real sessions: the unit tests above fake the mod engine, and the Pester round trip (TC-040, TC-051) covers only the bus helper and message model. Everything here is manual and needs live Claude Code sessions (`docs/test-runbook.md` section 6). None of it has been run. Until it is, delivery, the idle-session wake, the model obeying a framed prompt and cross-account behaviour are **unverified**.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0D0 | Order and reply round trip | Hub and Reports joined; ask the Hub's model to send Reports an order; Reports acts and replies | The worker's session starts a turn from `[Hub order #<id> to Reports] …`; its reply shows in the Hub as `[Reply from Reports to #<id>] …` and the Hub's model acts on it | Manual (not yet run) |
+| TC-0D1 | Broadcast | The Hub sends to `*` with two workers joined | Both act; the Hub does not receive its own order | Manual (not yet run) |
+| TC-0D2 | Unprompted worker message | A worker's model sends a message with no order to answer | The Hub receives `[Message from <name>] …` | Manual (not yet run) |
+| TC-0D3 | Forged Hub line | `bus.ps1 append` a hand-written `from: Hub` order with another session id | The worker shows `Ignored an order from Hub…` and starts no turn | Manual (not yet run) |
+| TC-0D4 | Delivery time | Time from the append to the receiving session starting its turn | Under 5 s (NFR-001, FR-006) | Manual (not yet run) |
+| TC-0D5 | Idle wake and busy queue | Send an order to an idle worker; send another while the worker is mid-turn | The idle one starts a turn by itself; the busy one runs after the current turn, in order | Manual (not yet run) |
+| TC-0D6 | Model obeys the frame | Read what the receiving model does with the framed prompt | It performs the task and answers with the `send` tool, with `replyTo` set | Manual (not yet run). Model behaviour, not code |
+| TC-0D7 | Reload then receive | Reload the mod in a joined worker, then send it an order | The listener resumes from the stored position; the order is received once; nothing already seen is replayed | Manual (not yet run) |
+| TC-0D8 | No permission prompt | Run TC-0D0 to TC-0D2 in the normal permission mode | No prompt in any session (NFR-009) | Manual (not yet run) |
+| TC-0D9 | Three accounts | Hub and two workers in three signed-in accounts | As TC-0D0 and TC-0D1 across accounts | Manual (not yet run). This is F-016 (Phase 4) |
