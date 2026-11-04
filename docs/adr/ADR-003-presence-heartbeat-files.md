@@ -15,6 +15,10 @@ file is missing or stale. Join writes the file, waits briefly, re-reads it, and 
 session's id is now there. Leave deletes it. Join and leave are also logged on the bus as `info`
 lines, so the history shows them.
 
+> **Amended 2026-11-04 (Architecture v6):** join and leave are logged with their own `kind`
+> values, `join` and `leave`, not as `info` lines. The join order in Architecture §4 (v4) made the
+> join line the signal the Hub reads, so it needs its own kind. The rest of this decision stands.
+
 ## Alternatives Considered
 
 | Option | Why not chosen |

@@ -2,16 +2,16 @@
 
 > Status: ACTIVE
 > Tranche: v1
-> Version: v3
+> Version: v9
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
-> Architecture: docs/architecture.md (built against v5)
+> Architecture: docs/architecture.md (built against v6)
 
 ## Phases & Milestones
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| Phase 1 | Foundation: the mod loads in every account with no permission prompts, and lines can be safely written to and streamed from the shared file | Planned |
+| Phase 1 | Foundation: the mod loads in every account with no permission prompts, and lines can be safely written to and streamed from the shared file | Done |
 | Phase 2 | Presence: sessions join by name, keep a heartbeat, and know whether the Hub is there | Planned |
 | Phase 3 | Messaging: the Hub gives orders, workers act and reply, both ways, with the Hub's authority checked | Planned |
 | Phase 4 | Visibility: the person sees who is alive, reads the history, and can clear it | Planned |
@@ -21,10 +21,10 @@
 
 | ID | Feature | Phase | Priority | Status | Acceptance Criteria |
 |----|---------|-------|----------|--------|---------------------|
-| F-001 | Mod skeleton + permission spike | 1 | Must | Planned | The mod loads in a session of two different accounts. From a `session.start` hook it creates the shared folder, writes, reads and lists a file there, and runs `powershell.exe` via `$.process.run` and `$.process.spawn`, with **no permission prompt** in any permission mode the user uses (proves NFR-009 / risk A7). If any step prompts, stop and raise it before Phase 2 |
-| F-002 | Bus helper: `append` | 1 | Must | Planned | `bus.ps1 append` takes the named mutex `Local\ClaudeSessionHubBus`, writes exactly one whole line plus newline in one write, flushes and releases; creates file and folder if missing. 10 processes appending 100 lines each at once give 1,000 valid JSON lines, none lost or torn (NFR-003). An abandoned mutex (holder killed mid-write) is taken over. Waits up to 2 s for the mutex, then exits non-zero with a clear error (ADR-006) |
-| F-003 | Bus helper: `tail` | 1 | Must | Planned | `bus.ps1 tail -From <file id>:<offset>` polls about once a second and prints every complete new line within 2 s of it being appended. Takes bytes only up to the last newline and never moves its offset past an unfinished line (test: a file ending in half a line prints nothing until the rest arrives). Uses no change notifications. Reads only new bytes (works on a 50 MB file). Runs until killed (ADR-006) |
-| F-004 | Message model | 1 | Must | Planned | One module builds and parses a bus line with `id, ts, from, fromSession, to, kind, replyTo, body` (Architecture §4). A malformed line is skipped and logged, never crashes the listener |
+| F-001 | Mod skeleton + permission spike | 1 | Must | Done | The mod loads in a session of two different accounts. From a `session.start` hook it creates the shared folder, writes, reads and lists a file there, and runs `powershell.exe` via `$.process.run` and `$.process.spawn`, with **no permission prompt** in any permission mode the user uses (proves NFR-009 / risk A7). If any step prompts, stop and raise it before Phase 2 |
+| F-002 | Bus helper: `append` | 1 | Must | Done | `bus.ps1 append` takes the named mutex `Local\ClaudeSessionHubBus`, writes exactly one whole line plus newline in one write, flushes and releases; creates file and folder if missing. 10 processes appending 100 lines each at once give 1,000 valid JSON lines, none lost or torn (NFR-003). An abandoned mutex (holder killed mid-write) is taken over. Waits up to 2 s for the mutex, then exits non-zero with a clear error (ADR-006) |
+| F-003 | Bus helper: `tail` | 1 | Must | Done | `bus.ps1 tail -From <file id>:<offset>` polls about once a second and prints every complete new line within 2 s of it being appended. Takes bytes only up to the last newline and never moves its offset past an unfinished line (test: a file ending in half a line prints nothing until the rest arrives). Uses no change notifications. Reads only new bytes (works on a 50 MB file). Runs until killed (ADR-006) |
+| F-004 | Message model | 1 | Must | Done | One module builds and parses a bus line with `id, ts, from, fromSession, to, kind, replyTo, body` (Architecture §4). A malformed line is skipped and logged, never crashes the listener |
 | F-005 | `/hub-join <name>` | 2 | Must | Planned | In this order: checks the name is free, starts the listener at the log's current end, claims `presence\<name>.json`, appends a `join` line. A name held by a live session (heartbeat under 30 s), including `Hub`, is refused with a message asking for another name. Two sessions claiming the same free name at once: exactly one wins (re-read check, ADR-003). Test: the Hub sends to the worker the instant it reads the `join` line, and the worker receives it. The status line shows the joined name and role |
 | F-006 | Heartbeat and leave | 2 | Must | Planned | Joined session rewrites its presence file at least every 10 s. `/hub-leave` deletes it and logs a leave line. A session that ends or crashes has its name free within 30 s |
 | F-007 | Hub-away state | 2 | Must | Planned | A worker whose view of `presence\Hub.json` is missing or older than 30 s shows `Hub away — waiting`, keeps any queued work, and returns to normal when the Hub is back (FR-012) |
@@ -84,3 +84,9 @@
 | v1 | 2026-11-04 | Initial draft | — | — |
 | v2 | 2026-11-04 | PMBook approved | Gate approval | Muhammed Ali Khan |
 | v3 | 2026-11-04 | F-002, F-003, F-005, F-009, F-012, F-014 tightened for mutex writes, complete-line reads, join order and archive-on-clear; added F-017 concurrency proof (Phase 4) | Ripple from Architecture v5 | — |
+| v4 | 2026-11-04 | F-001 Done: Reviewer PASS; user ran the self-test in two accounts — no permission prompt, all 6 steps OK, both accounts see the shared folder | Triage edit | — |
+| v5 | 2026-11-04 | F-004 Done: Reviewer PASS after 2 iterations | Triage edit | — |
+| v6 | 2026-11-04 | F-002 Done: Reviewer PASS first time; F-003 In Progress | Triage edit | — |
+| v7 | 2026-11-04 | F-003 Done: Reviewer PASS after 2 iterations | Triage edit | — |
+| v8 | 2026-11-04 | Architecture v6 sync (docs now match the Phase 1 build; no backlog change). TC-005 confirmed by the user: no prompt in the normal permission mode | Ripple from Architecture v6 | — |
+| v9 | 2026-11-04 | Phase 1 complete: F-001..F-004 Done; Phase 1 Integration PASS after 3 Reviewer-Integration rounds (tsc 0 errors, `claude plugin test` 14/14, Pester 24/24, PS 5.1 parse clean) | Triage edit | — |

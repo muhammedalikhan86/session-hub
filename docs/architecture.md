@@ -1,7 +1,7 @@
 # Architecture: Session Hub — talking between Claude Code sessions
 
 > Status: APPROVED
-> Version: v5
+> Version: v6
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
 
@@ -79,17 +79,27 @@ gone even if it never said goodbye. That keeps heartbeats from filling the log f
 - **Technology:** Claude Code mod (hooks module, TypeScript), see ADR-004, ADR-005.
 
 ### Bus helper (`bus.ps1`, shipped inside the mod)
-- **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006:
+- **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006
+  (built so far: `append` and `tail`, Phase 1; `clear` and following a clear land in F-014, Phase 4):
   `append` (takes the bus mutex, writes one whole line, flushes, releases),
   `clear` (takes the bus mutex, moves the file into `archive\`, starts an empty one) and
-  `tail -From <file id>:<byte offset>` (polls about once a second, prints only complete
-  newline-ended lines, follows a clear into the new file, runs forever).
-- **Inputs:** A JSON line on stdin (append); a file id and byte offset (tail).
-- **Outputs:** The line written to the file (append); a stream of lines on stdout (tail).
+  `tail -From <file id>:<byte offset>|end` (polls about once a second, prints only complete
+  newline-ended lines, follows a clear into the new file, runs forever). `end` starts at the
+  current end of the file, or at 0 if the file does not exist yet.
+- **Inputs:** append: `-Path` and `-LineBase64` (base64 of one UTF-8 JSON line, with no LF or CR).
+  tail: `-Path` and `-From`. The file id is the NTFS file identity, written in hex as
+  `<volume serial>-<index high><index low>`.
+- **Outputs:** append writes the line plus a newline (LF) and prints nothing; it exits 0 (ok), 1 (I/O error),
+  2 (bad input) or 3 (mutex timeout, nothing written). tail prints each bus line as it is, plus
+  `#pos <file id>:<offset>` lines at start and after each batch, so the mod can store where it is.
+  Bus lines start with `{`, so `#pos` lines cannot be mistaken for them. If the file id changes or
+  the file shrinks below the offset, tail warns on stderr and restarts at 0 (reading the archived
+  file first lands in F-014).
 - **Dependencies:** Windows PowerShell, which every Windows 11 machine has.
-- **Technology:** PowerShell script run by `$.process.run` (append, clear) and `$.process.spawn`
+- **Technology:** PowerShell script run by `$.process.run` (append; clear from F-014) and `$.process.spawn`
   (tail); writers serialised by the named mutex `Local\ClaudeSessionHubBus`. See ADR-006
-  (supersedes ADR-002).
+  (supersedes ADR-002). Tests use Pester 6.2 under PowerShell 7; the helper itself runs on
+  Windows PowerShell 5.1.
 
 ### Shared folder (`%USERPROFILE%\.claude-session-hub\`)
 - **Responsibility:** The meeting place. Holds `bus.jsonl`, `presence\` and `archive\` (cleared logs).
@@ -113,10 +123,10 @@ One JSON object per line in `bus.jsonl`:
 |-------|---------|
 | `id` | Unique id, made by the sender's mod |
 | `ts` | Time sent, ISO 8601 |
-| `from` | Sender's session name — stamped by the mod, never taken from the model |
+| `from` | Sender's session name — stamped by the mod, never taken from the model. A session name is 1 to 32 letters, digits, `_` or `-` |
 | `fromSession` | Sender's Claude Code session id — what makes the Hub hard to fake (ADR-005) |
 | `to` | A session name, or `*` for every active session |
-| `kind` | `order` (Hub only), `reply` (workers, to the Hub), `info` (anything else) |
+| `kind` | `order` (Hub only), `reply` (workers, to the Hub), `info` (anything else), `join` and `leave` (presence announcements written by the mod on join and leave; shown to the Hub, never queued as prompts) |
 | `replyTo` | The `id` being answered, on a reply |
 | `body` | The message text |
 
@@ -219,7 +229,7 @@ stateDiagram-v2
 | NFR-006 | Safety | No secrets on the bus | PRD constraint. The `send` tool description tells the model so |
 | NFR-007 | Scalability | Fine up to about 10 sessions and a log of tens of MB | The tail reads only new bytes, so log size does not slow it |
 | NFR-008 | Portability | Needs nothing beyond Claude Code and the PowerShell that ships with Windows | |
-| NFR-009 | Usability | Normal use (join, send, receive, heartbeat, clear) raises no permission prompt in any session | The model never touches the shared folder with its own tools; only the mod does. Risk A7 |
+| NFR-009 | Usability | Normal use (join, send, receive, heartbeat, clear) raises no permission prompt in any session | The model never touches the shared folder with its own tools; only the mod does. Risk A7. Verified by F-001 |
 
 ## 7. Technology Decisions
 
@@ -238,7 +248,7 @@ stateDiagram-v2
 |----|----------------|--------|------------|-------|-----------|
 | A1 | Could Claude Code's built-in session messaging (`SendMessage` / `ListAgents`, `$.session.send`) do this job? | Medium | Low | Muhammed | Yes — it only works between sessions of the same signed-in account. Crossing accounts is the reason this mod exists. Noted as a possible extra path for same-account sessions later |
 | A2 | Hub and worker models could loop (order → reply → new order…) and burn tokens | Low | Low | Muhammed | Yes — accepted, no cap. The Hub is the controller: it orders, the worker reports "done", the Hub decides what is next. Workers never give orders, so a loop needs the Hub to keep choosing to send more |
-| A7 | The mod reads and writes files outside every session's project folder. If those file calls raised permission prompts, sessions could not act without a human | High | Low | Muhammed | No — the prompts seen today guard the model's own tools (Read, Bash, Edit), and the `.claude` folder is extra-guarded. The mod's `$.fs` / `$.process` calls run outside the model's tools, and the shared folder is not inside `.claude`. To be proven in the first build item (NFR-009) |
+| A7 | The mod reads and writes files outside every session's project folder. If those file calls raised permission prompts, sessions could not act without a human | High | Low | Muhammed | Yes — proven by F-001: the self-test ran in two accounts in the normal permission mode, all 6 steps OK, no permission prompt. Original reasoning: the prompts seen today guard the model's own tools (Read, Bash, Edit), and the `.claude` folder is extra-guarded. The mod's `$.fs` / `$.process` calls run outside the model's tools, and the shared folder is not inside `.claude`. To be proven in the first build item (NFR-009) |
 | A3 | Two sessions claim the same free name within the same second | Low | Low | Muhammed | No — second claim re-reads after writing and backs off if it lost |
 | A4 | Antivirus or OneDrive locking files in `%USERPROFILE%` slows appends | Low | Low | Muhammed | No — folder is outside OneDrive; append retries |
 | A5 | A spawned PowerShell per session costs memory (~60 MB each) | Low | Medium | Muhammed | No — acceptable for ~10 sessions |
@@ -253,3 +263,4 @@ stateDiagram-v2
 | v3 | 2026-11-04 | Architecture approved; ADR-001 to ADR-005 accepted | Gate approval | Muhammed Ali Khan |
 | v4 | 2026-11-04 | Concurrency review: named mutex for writes and clear; readers take only complete lines; clear archives instead of emptying; join order (listen, then announce with a `join` line the Hub reads). ADR-006 supersedes ADR-002 | Triage edit | — |
 | v5 | 2026-11-04 | Changes approved | Gate approval | Muhammed Ali Khan |
+| v6 | 2026-11-04 | Synced with Phase 1 build: `kind` list adds join/leave; risk A7 resolved by F-001; Bus helper inputs/outputs (`-LineBase64`, exit codes, `#pos` lines, `-From end`, file id format); Pester 6.2; session-name rule (1 to 32 of `A-Z a-z 0-9 _ -`); ADR-003 amended: join/leave have their own kinds; Bus helper marks `clear` and clear-following as F-014 | Triage edit | — |
