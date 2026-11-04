@@ -1,5 +1,5 @@
 {
-  "runId": "run-2026-11-04-01",
+  "runId": "run-2026-11-04-02",
   "startedAt": "2026-11-04",
   "complete": true,
   "platform": {
@@ -18,28 +18,21 @@
   },
   "queue": [
     {
-      "id": "F-001",
-      "type": "Feature",
-      "status": "Done",
-      "loopCount": 0,
-      "lastVerdict": "PASS"
-    },
-    {
-      "id": "F-002",
-      "type": "Feature",
-      "status": "Done",
-      "loopCount": 0,
-      "lastVerdict": "PASS"
-    },
-    {
-      "id": "F-003",
+      "id": "F-005",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
       "lastVerdict": "PASS"
     },
     {
-      "id": "F-004",
+      "id": "F-006",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 3,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-007",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
@@ -47,7 +40,7 @@
     }
   ],
   "currentIndex": 2,
-  "note": "F-001 manually verified (no prompts, 2 accounts). F-002 and F-004 run in parallel (disjoint files); F-003 after F-002 (same bus.ps1).",
+  "note": "Phase 2. Sequential: F-006 depends on F-005, F-007 on F-006, and all edit plugin/hooks/register.ts.",
   "phase": "Done",
   "integration": {
     "loopCount": 2,

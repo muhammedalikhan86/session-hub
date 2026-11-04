@@ -7,3 +7,7 @@
 | 2026-11-04 | run-2026-11-04-01 | F-002 | Feature | 0 | No | No | 0 | PASS |
 | 2026-11-04 | run-2026-11-04-01 | F-003 | Feature | 1 | No | No | 0 | PASS |
 | 2026-11-04 | run-2026-11-04-01 | Integration (Phase 1) | Integration | 2 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-02 | F-005 | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-02 | F-006 | Feature | 3 | No | Yes | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-02 | F-007 | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-02 | Integration (Phase 2) | Integration | 2 | No | No | 0 | PASS |
