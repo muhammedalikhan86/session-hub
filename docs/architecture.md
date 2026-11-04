@@ -1,7 +1,7 @@
 # Architecture: Session Hub — talking between Claude Code sessions
 
 > Status: APPROVED
-> Version: v3
+> Version: v5
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
 
@@ -48,19 +48,23 @@ flowchart LR
 
 There is no server. Each session's copy of the mod does four jobs:
 
-1. **Join.** The person runs `/hub-join <name>`. The mod claims that name in the presence folder,
-   or refuses if a live session already holds it.
+1. **Join.** The person runs `/hub-join <name>`. The mod checks the name is free in the presence
+   folder (or refuses), **starts listening at the current end of the log first**, then claims the
+   name and appends a `join` line ("I'm here"). The Hub learns of a new session by reading that
+   line, so it can only send to a session that is already listening.
 2. **Send.** The model calls the mod's `send` tool. The mod stamps the sender, the time and an id,
-   and appends one line to `bus.jsonl`.
-3. **Listen.** A helper process tails `bus.jsonl` and streams each new line to the mod. The mod
-   keeps only lines addressed to its own name or to `*`, and drops its own.
+   and appends one line to `bus.jsonl` while holding the bus mutex (ADR-006).
+3. **Listen.** A helper process polls `bus.jsonl` about once a second from its own byte offset and
+   streams each complete new line to the mod. It never relies on change notifications, so it cannot
+   miss a line, and it never hands over a half-written one. The mod keeps only lines addressed to its
+   own name or to `*`, and drops its own.
 4. **Act.** A valid order from the Hub, or a reply to the Hub, becomes a new prompt in the session
    (`$.prompt.submit`). It starts a turn when the session is idle, or waits its turn if busy.
    Anything else is shown to the person as a notice only.
 
-Presence is kept apart from the message log. Each session rewrites its own small heartbeat file every
-10 seconds. The Hub reads the folder to know who is alive. That keeps heartbeats from filling the
-log forever.
+Joins and leaves are announced on the log. Liveness is kept apart from it: each session rewrites its
+own small heartbeat file every 10 seconds, and a session whose heartbeat is over 30 s old counts as
+gone even if it never said goodbye. That keeps heartbeats from filling the log forever.
 
 ## 3. Components
 
@@ -75,17 +79,20 @@ log forever.
 - **Technology:** Claude Code mod (hooks module, TypeScript), see ADR-004, ADR-005.
 
 ### Bus helper (`bus.ps1`, shipped inside the mod)
-- **Responsibility:** The only code that touches `bus.jsonl`. Two verbs:
-  `append` (one line, safe against several writers at once) and `tail -From <byte offset>`
-  (prints every new line as it lands, forever).
-- **Inputs:** A JSON line on stdin (append); a byte offset (tail).
+- **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006:
+  `append` (takes the bus mutex, writes one whole line, flushes, releases),
+  `clear` (takes the bus mutex, moves the file into `archive\`, starts an empty one) and
+  `tail -From <file id>:<byte offset>` (polls about once a second, prints only complete
+  newline-ended lines, follows a clear into the new file, runs forever).
+- **Inputs:** A JSON line on stdin (append); a file id and byte offset (tail).
 - **Outputs:** The line written to the file (append); a stream of lines on stdout (tail).
 - **Dependencies:** Windows PowerShell, which every Windows 11 machine has.
-- **Technology:** PowerShell script run by `$.process.run` (append) and `$.process.spawn` (tail),
-  see ADR-002.
+- **Technology:** PowerShell script run by `$.process.run` (append, clear) and `$.process.spawn`
+  (tail); writers serialised by the named mutex `Local\ClaudeSessionHubBus`. See ADR-006
+  (supersedes ADR-002).
 
 ### Shared folder (`%USERPROFILE%\.claude-session-hub\`)
-- **Responsibility:** The meeting place. Holds `bus.jsonl` and `presence\`.
+- **Responsibility:** The meeting place. Holds `bus.jsonl`, `presence\` and `archive\` (cleared logs).
 - **Inputs / Outputs:** Files only.
 - **Dependencies:** None.
 - **Technology:** Plain files, see ADR-001 and ADR-003. Path can be changed by a mod option.
@@ -167,18 +174,23 @@ stateDiagram-v2
   HubAway --> Unjoined: /hub-leave or session ends
 ```
 
-- **On join** the mod starts reading the log **from its current end**, so a new session never acts
-  on old orders. It remembers its read offset in `$.state` so a mod reload carries on where it was.
+- **On join**, in this order: (1) check the name is free, (2) start the listener at the log's
+  current end, (3) claim the name and start the heartbeat, (4) append the `join` line. The Hub adds
+  the session to its list when it reads that line, so anything the Hub sends after that is past the
+  worker's starting offset and cannot be missed. A new session never acts on old orders. It keeps its
+  file id and offset in `$.state` so a mod reload carries on where it was.
 - **Hub away:** a worker keeps doing whatever is already queued, then simply has nothing new to do.
   Status line says `Hub away — waiting`.
-- **Clear:** `/hub-clear` (Hub only) empties `bus.jsonl`. Each tail sees the file shrink below its
-  offset and starts again from 0.
+- **Clear:** `/hub-clear` (Hub only), under the bus mutex, moves `bus.jsonl` to
+  `archive\bus-<UTC timestamp>.jsonl` and starts an empty one. Each listener sees the file id
+  change, finishes reading the archived file to its end, then starts the new file from 0, so no
+  message sent around a clear is lost (ADR-006).
 
 ## 5. Functional Requirements
 
 | ID | Requirement | Source (PRD story) | Priority |
 |----|-------------|-------------------|----------|
-| FR-001 | `/hub-join <name>` claims a unique name; refuses a name held by a live session and asks for another | US-9, US-13 | Must |
+| FR-001 | `/hub-join <name>` claims a unique name; refuses a name held by a live session and asks for another; starts listening before it announces itself with a `join` line | US-9, US-13 | Must |
 | FR-002 | `/hub-leave` releases the name; the name is also released when the session ends or its heartbeat goes stale | US-9 | Must |
 | FR-003 | A `send` tool lets the model send `{to, body}`; the mod stamps `id`, `ts`, `from`, `fromSession`, `kind` | US-1, US-2, US-5 | Must |
 | FR-004 | Only the session that holds the name `Hub` can send `kind: order`. A worker's `send` always goes to the Hub as a `reply`; it may answer an order (`replyTo` set) or start a new message to the Hub on its own (e.g. "done", "stuck, need input"), so talk runs both ways | US-5, US-10 | Must |
@@ -191,7 +203,7 @@ stateDiagram-v2
 | FR-011 | The Hub shows a live list of sessions (pane) and a `list_sessions` tool the Hub model can call | US-6 | Must |
 | FR-012 | A worker shows `Hub away — waiting` when the Hub's heartbeat is stale, and never drops queued work | US-11 | Must |
 | FR-013 | `/hub-history` shows recent messages; the full log stays readable as a plain file | US-7 | Should |
-| FR-014 | `/hub-clear` (Hub only) empties the log | US-12 | Should |
+| FR-014 | `/hub-clear` (Hub only) archives the log and starts an empty one, losing no message sent around it | US-12 | Should |
 | FR-015 | Each message id is acted on at most once per session, across mod reloads | US-3 | Must |
 | FR-016 | Works the same in any account's config folder; shared folder path is a mod option | US-8 | Must |
 
@@ -201,7 +213,7 @@ stateDiagram-v2
 |----|----------|-------------|-------|
 | NFR-001 | Performance | A line appended is seen by every listening session within 5 s | The tail checks about once a second |
 | NFR-002 | Performance | Presence list is at most 30 s old | 10 s heartbeat, 30 s stale limit |
-| NFR-003 | Reliability | No line lost or torn when several sessions append at once | ADR-002 |
+| NFR-003 | Reliability | No line lost, torn, half-read or missed when several sessions append at once, or around a clear | ADR-006 |
 | NFR-004 | Reliability | No message acted on twice; a reload does not replay | Offset + seen ids in `$.state` |
 | NFR-005 | Safety | Only the live Hub's orders are acted on; `from` cannot be set by the model | ADR-005. Guards against accidents, not against a hostile program running as the same Windows user |
 | NFR-006 | Safety | No secrets on the bus | PRD constraint. The `send` tool description tells the model so |
@@ -214,7 +226,7 @@ stateDiagram-v2
 | Concern | Choice | ADR | Rationale |
 |---------|--------|-----|-----------|
 | Where messages travel | One JSON Lines file in a shared folder outside every config folder | ADR-001 | What you asked for; readable by any account and by a person |
-| Writing and reading the file safely | A PowerShell helper: locked append, streaming tail | ADR-002 | The mod API has no append and caps reads at 4 MiB |
+| Writing and reading the file safely | PowerShell helper; named mutex for every write and clear; readers poll by offset and take only complete lines; clear rotates into an archive | ADR-006 | The mod API has no append and caps reads at 4 MiB; mutex avoids torn lines; offset polling cannot miss a line |
 | Who is alive, who owns a name | One heartbeat file per session, not lines on the bus | ADR-003 | Keeps the log for real messages only |
 | How a message becomes work | `$.prompt.submit` for orders/replies; notices for the rest | ADR-004 | Wakes an idle session, never interrupts a busy one |
 | Making the Hub hard to fake | Mod stamps `from` + `fromSession`; orders checked against the live Hub claim | ADR-005 | Sessions act with no human check |
@@ -239,3 +251,5 @@ stateDiagram-v2
 | v1 | 2026-11-04 | Initial draft | — | — |
 | v2 | 2026-11-04 | Resolved A1 (built-in messaging is same-account only) and A2 (accepted, no cap). Added risk A7 and NFR-009 (no permission prompts). FR-004: workers may start a message to the Hub, not only answer one | Triage edit | — |
 | v3 | 2026-11-04 | Architecture approved; ADR-001 to ADR-005 accepted | Gate approval | Muhammed Ali Khan |
+| v4 | 2026-11-04 | Concurrency review: named mutex for writes and clear; readers take only complete lines; clear archives instead of emptying; join order (listen, then announce with a `join` line the Hub reads). ADR-006 supersedes ADR-002 | Triage edit | — |
+| v5 | 2026-11-04 | Changes approved | Gate approval | Muhammed Ali Khan |

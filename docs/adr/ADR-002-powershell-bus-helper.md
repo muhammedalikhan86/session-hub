@@ -1,6 +1,6 @@
 # ADR-002: A PowerShell helper does every append and the tail
 
-> Status: ACCEPTED
+> Status: SUPERSEDED BY ADR-006
 > Date: 2026-11-04
 > Architecture: docs/architecture.md (v1)
 
