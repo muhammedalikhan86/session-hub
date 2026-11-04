@@ -1,5 +1,5 @@
 {
-  "runId": "run-2026-11-04-02",
+  "runId": "run-2026-11-04-03",
   "startedAt": "2026-11-04",
   "complete": true,
   "platform": {
@@ -18,32 +18,39 @@
   },
   "queue": [
     {
-      "id": "F-005",
+      "id": "F-008",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 0,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-009",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
       "lastVerdict": "PASS"
     },
     {
-      "id": "F-006",
-      "type": "Feature",
-      "status": "Done",
-      "loopCount": 3,
-      "lastVerdict": "PASS"
-    },
-    {
-      "id": "F-007",
+      "id": "F-010",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-011",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 0,
       "lastVerdict": "PASS"
     }
   ],
-  "currentIndex": 2,
-  "note": "Phase 2. Sequential: F-006 depends on F-005, F-007 on F-006, and all edit plugin/hooks/register.ts.",
+  "currentIndex": 4,
+  "note": "Phase 3. Sequential: all edit plugin/hooks/register.ts; F-010 needs F-008+F-009; F-011 needs F-010.",
   "phase": "Done",
   "integration": {
-    "loopCount": 2,
+    "loopCount": 0,
     "lastVerdict": "PASS"
   }
 }
