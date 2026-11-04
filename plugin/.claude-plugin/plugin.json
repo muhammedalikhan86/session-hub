@@ -1,5 +1,6 @@
 {
   "name": "session-hub",
   "version": "0.1.0",
-  "description": "Lets Claude Code sessions signed in to different accounts talk through a shared folder."
+  "description": "Lets Claude Code sessions signed in to different accounts talk through a shared folder.",
+  "types": "./types/index.d.ts"
 }
