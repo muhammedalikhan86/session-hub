@@ -1,0 +1,6 @@
+node_modules/
+plugin/.claude-plugin/types/
+testResults.xml
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
+plugin/graphify-out/
