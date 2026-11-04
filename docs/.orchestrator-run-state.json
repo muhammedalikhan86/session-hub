@@ -1,0 +1,56 @@
+{
+  "runId": "run-2026-11-04-01",
+  "startedAt": "2026-11-04",
+  "complete": true,
+  "platform": {
+    "name": "Claude Code mod (TypeScript) + Windows PowerShell 5.1 helper",
+    "sourceDir": "plugin",
+    "format": "none",
+    "lint": [
+      "npx -p typescript tsc -p plugin",
+      "claude plugin validate plugin"
+    ],
+    "test": [
+      "claude plugin test plugin",
+      "pwsh -NoProfile -Command \"Invoke-Pester plugin/tests -CI\""
+    ],
+    "audit": "none (no third-party dependencies)"
+  },
+  "queue": [
+    {
+      "id": "F-001",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 0,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-002",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 0,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-003",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 1,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-004",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 1,
+      "lastVerdict": "PASS"
+    }
+  ],
+  "currentIndex": 2,
+  "note": "F-001 manually verified (no prompts, 2 accounts). F-002 and F-004 run in parallel (disjoint files); F-003 after F-002 (same bus.ps1).",
+  "phase": "Done",
+  "integration": {
+    "loopCount": 2,
+    "lastVerdict": "PASS"
+  }
+}
