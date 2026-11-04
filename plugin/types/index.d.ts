@@ -13,6 +13,12 @@ export type JoinedIdentity = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'session-hub': { listenerPos: ListenerPos; joined: JoinedIdentity | null }
+    'session-hub': {
+      // Cleared (null) on every join and every leave, so one join's position never serves another.
+      listenerPos: ListenerPos | null
+      // The last delivered line ids, oldest first (bounded; see hooks/inbox.ts).
+      seenIds: string[]
+      joined: JoinedIdentity | null
+    }
   }
 }

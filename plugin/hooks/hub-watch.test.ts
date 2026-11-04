@@ -412,6 +412,24 @@ test('restore starts a watcher for a worker only', async () => {
       },
       {
         read: async () => JSON.stringify(held),
+        spawn: () => ({
+          [Symbol.asyncIterator]: () => {
+            let sent = false
+
+            return {
+              next: async () =>
+                sent
+                  ? new Promise<never>(() => {})
+                  : ((sent = true), { done: false as const, value: { stream: 'stdout', text: '#pos 1-1:0\n' } }),
+              return: async () => ({ done: true as const, value: undefined }),
+            }
+          },
+        }),
+        helper: 'bus.ps1',
+        busPath: 'bus.jsonl',
+        waitMs: () => new Promise<void>(() => {}),
+        onLine: () => {},
+        onPos: () => {},
         now: () => T0,
         sessionId: 's1',
         startHeartbeat: () => heartbeatStub([]),

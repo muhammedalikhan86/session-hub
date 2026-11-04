@@ -462,6 +462,24 @@ const restoreRig = (file: string | undefined) => {
   const log: string[] = []
   const deps: RestoreDeps = {
     read: async () => file,
+    spawn: () => ({
+      [Symbol.asyncIterator]: () => {
+        let sent = false
+
+        return {
+          next: async () =>
+            sent
+              ? new Promise<never>(() => {})
+              : ((sent = true), { done: false as const, value: { stream: 'stdout', text: '#pos 1-1:0\n' } }),
+          return: async () => ({ done: true as const, value: undefined }),
+        }
+      },
+    }),
+    helper: 'bus.ps1',
+    busPath: 'bus.jsonl',
+    waitMs: () => new Promise<void>(() => {}),
+    onLine: () => {},
+    onPos: () => {},
     now: () => NOW,
     sessionId: 's1',
     startHeartbeat: id => {
