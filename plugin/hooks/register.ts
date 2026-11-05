@@ -1,25 +1,45 @@
+import { atom, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import { appendMessage, ensureBusFile, helperPath, removeFile } from './bus-client'
 import type { RunFn } from './bus-client'
+import { handleClear } from './clear'
+import { handleHistory } from './history'
 import { startHeartbeat } from './heartbeat'
 import type { Heartbeat, HeartbeatIdentity } from './heartbeat'
 import { startHubWatch, statusWith } from './hub-watch'
 import type { HubWatch } from './hub-watch'
 import { makeIsFromLiveHub, routeMessage } from './deliver'
+import { withHubSection } from './hub-prompt'
+import { handleListSessions, LIST_DESCRIPTION, LIST_SCHEMA, LIST_TOOL } from './list-sessions'
 import { createInbox } from './inbox'
 import type { Inbox } from './inbox'
 import { guardedJoin, join } from './join'
 import type { JoinDeps, JoinResult, JoinState } from './join'
 import { completeJoin, endSession, leaveSession, markLost } from './leave'
 import type { LeaveDeps } from './leave'
-import { resolveSharedFolder } from './paths'
-import { accountFrom, presencePath } from './presence'
+import { configureSharedFolder, resolveSharedFolder } from './paths'
+import { accountFrom, presencePath, roleFor } from './presence'
 import type { Presence } from './presence'
+import {
+  applyPresenceLine,
+  buildRoster,
+  loadPresenceFiles,
+  markPresenceLine,
+  startRosterRefresh,
+} from './roster'
+import type { LeftSet, RosterRefresh } from './roster'
+import { renderRosterPane, ROSTER_PANE } from './roster-pane'
 import type { ListenerPos } from '../types'
 import { restoreJoin } from './restore'
 import { runSelfTest } from './selftest'
 import { handleSend, SEND_DESCRIPTION, SEND_SCHEMA, SEND_TOOL } from './send'
+
+// Same ref and shape as roster-pane.tsx's atom: the validator reads a writer's
+// atom only from this file, and the pane reads it only from its own.
+const rosterAtom = atom({ plugin: 'session-hub', key: 'roster' } as const, [], {
+  shape: 'roster-1',
+})
 
 const NOT_JOINED_STATUS = 'Session Hub: not joined'
 
@@ -27,6 +47,51 @@ const state: JoinState = { joining: false }
 
 // Recreated on every join and restore (its seen ids come from `$.state`).
 let inbox: Inbox | undefined
+
+// The Hub's roster refresh, alive exactly as long as its heartbeat.
+let rosterRefresh: RosterRefresh | undefined
+
+// Shared by the pane refresh and list_sessions so they agree.
+const leftNames: LeftSet = new Map()
+
+const readText = ($: EngineInterface) => async (path: string): Promise<string | undefined> => {
+  if (!(await $.fs.exists(path))) return undefined
+
+  const text = await $.fs.read(path)
+
+  return typeof text === 'string' ? text : undefined
+}
+
+const presenceDir = async ($: EngineInterface): Promise<string> =>
+  `${await resolveSharedFolder($)}\\presence`
+
+const listDeps = ($: EngineInterface) => ({
+  list: async (dir: string) => (await $.fs.list(dir)).map(entry => entry.name),
+  read: readText($),
+})
+
+const startRoster = ($: EngineInterface): RosterRefresh => {
+  leftNames.clear()
+  void $.ui.open({ id: ROSTER_PANE, title: 'Sessions' }).catch(() => {})
+
+  return startRosterRefresh({
+    every: (ms, fn) => $.clock.every(ms, fn),
+    refresh: async () => {
+      const files = await loadPresenceFiles(listDeps($), await presenceDir($))
+      const rows = buildRoster(files, Date.now(), leftNames)
+
+      await update($, rosterAtom, () => rows)
+    },
+  })
+}
+
+const stopRoster = async ($: EngineInterface): Promise<void> => {
+  const running = rosterRefresh
+
+  rosterRefresh = undefined
+  await running?.stop().catch(() => {})
+  await $.ui.close({ id: ROSTER_PANE }).catch(() => {})
+}
 
 const handleBusLine = (line: string): void => {
   void inbox?.handle(line)
@@ -56,8 +121,15 @@ const makeInbox = ($: EngineInterface, folder: string, seed: readonly string[]):
       storePos: pos => $.state.set({ plugin: 'session-hub', key: 'listenerPos' }, pos),
       persist: ids => $.state.set({ plugin: 'session-hub', key: 'seenIds' }, ids),
       // Returned, so the inbox keeps order across the Hub check's file read.
-      onMessage: message =>
-        routeMessage(message, {
+      onMessage: message => {
+        if (rosterRefresh && (message.kind === 'join' || message.kind === 'leave')) {
+          markPresenceLine(leftNames, message)
+          void update($, rosterAtom, rows => applyPresenceLine(rows, message, Date.now())).catch(
+            () => {},
+          )
+        }
+
+        return routeMessage(message, {
           me: () =>
             state.joined && {
               name: state.joined.presence.name,
@@ -67,7 +139,8 @@ const makeInbox = ($: EngineInterface, folder: string, seed: readonly string[]):
           notify: text => $.ui.toast(`Session Hub: ${text}`),
           log: text => $.ui.log(text, { to: 'debug' }),
           isFromLiveHub,
-        }),
+        })
+      },
       log: text => $.ui.log(text, { to: 'debug' }),
     },
     seed,
@@ -107,8 +180,9 @@ const clearStored = ($: EngineInterface) => async (): Promise<void> => {
 
 // A beat's failure is reported once per streak (the heartbeat guarantees it);
 // losing the name unjoins this session.
-const beat = ($: EngineInterface, id: HeartbeatIdentity): Heartbeat =>
-  startHeartbeat(
+const beat = ($: EngineInterface, id: HeartbeatIdentity): Heartbeat => {
+  const isHub = roleFor(id.name) === 'hub'
+  const heartbeat = startHeartbeat(
     {
       read: async path => {
         if (!(await $.fs.exists(path))) return undefined
@@ -121,6 +195,8 @@ const beat = ($: EngineInterface, id: HeartbeatIdentity): Heartbeat =>
       now: () => Date.now(),
       every: (ms, fn) => $.clock.every(ms, fn),
       onLost: () => {
+        if (isHub) void stopRoster($)
+
         void markLost(state, {
           clearStored: clearStored($),
           notify: text => {
@@ -134,6 +210,20 @@ const beat = ($: EngineInterface, id: HeartbeatIdentity): Heartbeat =>
     },
     id,
   )
+
+  if (!isHub) return heartbeat
+
+  // Leave, session.end and a restore all stop the heartbeat, so the roster
+  // and its pane follow it without those paths knowing about them.
+  rosterRefresh = startRoster($)
+
+  return {
+    stop: async () => {
+      await heartbeat.stop()
+      await stopRoster($)
+    },
+  }
+}
 
 // Hub-away only changes the status line and `state.hubAway`: the heartbeat,
 // the listener and the join are left alone, so queued work is kept.
@@ -183,9 +273,13 @@ const leaveDeps = async ($: EngineInterface): Promise<LeaveDeps> => {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const folderOption = configureSharedFolder(options.sharedFolder)
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+
+    if (folderOption.warning) $.ui.toast(`Session Hub: ${folderOption.warning}`)
 
     await $.command.register({
       name: 'hub-selftest',
@@ -200,12 +294,27 @@ export const register: Register = on => {
       name: 'hub-leave',
       description: 'Leave Session Hub and free this session\'s name',
     })
+    await $.command.register({
+      name: 'hub-history',
+      description: 'Show the last messages on the Session Hub bus: /hub-history [count]',
+    })
+    await $.command.register({
+      name: 'hub-clear',
+      description: 'Archive the Session Hub log and start an empty one (Hub only)',
+    })
     // Registered at session start (the earliest it is accepted); a call while
     // unjoined is refused by handleSend.
     await $.tool.register({
       name: SEND_TOOL,
       description: SEND_DESCRIPTION,
       inputSchema: SEND_SCHEMA,
+      isDeferred: false,
+    })
+    await $.tool.register({
+      name: LIST_TOOL,
+      description: LIST_DESCRIPTION,
+      inputSchema: LIST_SCHEMA,
+      isDeferred: false,
     })
 
     // After a mod reload `$.state` still says we are joined; a fresh session has
@@ -225,6 +334,8 @@ export const register: Register = on => {
       await restoreJoin(state, value, {
         spawn: request => $.process.spawn(request),
         helper: helperPath($.plugin.root),
+        folder,
+        log: text => $.ui.log(text, { to: 'debug' }),
         busPath: `${folder}\\bus.jsonl`,
         storedPos: pos.value,
         waitMs: ms => $.clock.sleep(ms),
@@ -300,6 +411,53 @@ export const register: Register = on => {
           message,
         ),
     })
+  })
+
+  on('tool.call', { tool: `mcp__session-hub__${LIST_TOOL}` as never }, async $ =>
+    handleListSessions({
+      state,
+      now: () => Date.now(),
+      left: leftNames,
+      presenceDir: () => presenceDir($),
+      ...listDeps($),
+    }),
+  )
+
+  on('tool.describe', { tool: `mcp__session-hub__${LIST_TOOL}` as never }, async ($, e, next) => ({
+    ...(await next(e)),
+    isDeferred: false,
+  }))
+
+  on('ui.render', { component: 'Pane', requestId: ROSTER_PANE }, ($, e) =>
+    renderRosterPane($, e as never),
+  )
+
+  // Keeps the schema in the prompt's tool list, not behind ToolSearch (the model
+  // otherwise reaches for built-in session messaging). Same cast as above.
+  on('tool.describe', { tool: `mcp__session-hub__${SEND_TOOL}` as never }, async ($, e, next) => ({
+    ...(await next(e)),
+    isDeferred: false,
+  }))
+
+  // Only while joined; a failure falls back to the engine's own prompt. Not cached
+  // (it runs for every prompt sent), so a join or leave shows on the next turn.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+
+    try {
+      const p = state.joined?.presence
+
+      return {
+        ...composed,
+        sections: withHubSection(
+          composed.sections,
+          p && { name: p.name, role: p.role },
+          (id, text) => ({ id, text, scope: 'session' }),
+        ),
+      }
+    } catch {
+      return composed
+    }
   })
 
   on('command.run', { command: 'hub-selftest' }, async $ => {
@@ -391,6 +549,29 @@ export const register: Register = on => {
 
     return {
       text: `Joined as ${result.joined.presence.name} (${result.joined.presence.role}).`,
+    }
+  })
+
+  on('command.run', { command: 'hub-history' }, async ($, e) => ({
+    text: await handleHistory(e.args, {
+      run: (argv, init) => $.process.run(argv, init),
+      helper: helperPath($.plugin.root),
+      busPath: `${await resolveSharedFolder($)}\\bus.jsonl`,
+    }),
+  }))
+
+  on('command.run', { command: 'hub-clear' }, async $ => {
+    const run: RunFn = (argv, init) => $.process.run(argv, init)
+    const helper = helperPath($.plugin.root)
+    const busPath = `${await resolveSharedFolder($)}\\bus.jsonl`
+
+    return {
+      text: await handleClear({
+        state,
+        run,
+        helper,
+        busPath,
+      }),
     }
   })
 

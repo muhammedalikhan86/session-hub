@@ -67,6 +67,7 @@ const rig = (spawn: RestoreDeps['spawn'], storedPos?: RestoreDeps['storedPos']) 
     clearStored: () => {},
     spawn,
     helper: 'C:\\plugin\\bin\\bus.ps1',
+    folder: FOLDER,
     busPath: `${FOLDER}\\bus.jsonl`,
     waitMs: () => new Promise<void>(() => {}),
     onLine: () => {},
@@ -86,6 +87,36 @@ test('restore starts the listener from the stored position', async () => {
 
   expect(await restoreJoin({ joining: false }, identity, deps)).toBe('restored')
   expect(fromOf(run.argv)).toBe('1a-2b:42')
+})
+
+test('a stored join under a different shared folder is dropped, not restored', async () => {
+  const { run, spawn } = fakeSpawn(['#pos 1a-2b:99\n'])
+  const { deps, log } = rig(spawn)
+  const state: JoinState = { joining: false }
+  const lines: string[] = []
+  let cleared = 0
+
+  deps.folder = 'D:\\other'
+  deps.log = text => lines.push(text)
+  deps.clearStored = () => {
+    cleared += 1
+  }
+
+  expect(await restoreJoin(state, identity, deps)).toBe('dropped')
+  expect(cleared).toBe(1)
+  expect(lines.length).toBe(1)
+  expect(state.joined).toBeUndefined()
+  expect(log).toEqual([])
+  expect(run.argv).toEqual([])
+})
+
+test('the same folder in another letter case still restores', async () => {
+  const { spawn } = fakeSpawn(['#pos 1a-2b:99\n'])
+  const { deps } = rig(spawn)
+
+  deps.folder = 'c:\\HUB'
+
+  expect(await restoreJoin({ joining: false }, identity, deps)).toBe('restored')
 })
 
 test('with no stored position the restored listener starts from end', async () => {

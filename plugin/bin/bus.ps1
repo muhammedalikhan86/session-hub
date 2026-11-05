@@ -19,6 +19,24 @@
         <volserial>-<indexhigh><indexlow> (hex). "end" starts at the current end of the file (0 if it
         does not exist yet). A different file id, or a size below the offset, warns on stderr and
         restarts the current file at 0. Bad -From: exit 2.
+        Following a clear (F-014): when the file id differs from the one being read, the archive in
+        archive\bus-*.jsonl whose file id equals the old id is read from the stored offset to its end
+        (complete lines only; an unfinished last line is skipped with a warning), then any later
+        archives from 0, then the live file from 0 with a "#pos <newid>:0". With no such archive it
+        warns and restarts at 0. The same applies to a -From whose id has since been archived.
+
+    clear -Path <bus file>
+        Takes the bus mutex (same wait and exit 3 as append), moves the bus file to
+        archive\bus-<UTC yyyyMMddTHHmmssfffZ>.jsonl beside it, starts an empty bus file, and prints the
+        archive path. A missing bus file is just created (nothing printed). Exit 1 I/O, 2 bad input,
+        3 mutex timeout (nothing changed).
+
+    last -Path <bus file> -Count <n>
+        Read-only, takes no lock (readers never lock, ADR-006). Reads backwards from the end of the
+        file in 64 KiB chunks, so a log of any size costs only its last lines, and prints the last
+        <n> complete lines verbatim (UTF-8, LF-terminated), oldest first. An unfinished final line is
+        never printed. A missing file prints nothing and exits 0. A -Count that is not a positive
+        integer: exit 2.
 
 .EXAMPLE
     powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File bus.ps1 append -Path C:\x\bus.jsonl -LineBase64 eyJhIjoxfQ==
@@ -29,7 +47,8 @@ param(
     [string]$Verb,
     [string]$Path,
     [string]$LineBase64,
-    [string]$From
+    [string]$From,
+    [string]$Count
 )
 
 Set-StrictMode -Version Latest
@@ -171,8 +190,156 @@ public static class BusNative
         for (int k = count - 1; k >= 0; k--) { if (buffer[k] == 10) return k; }
         return -1;
     }
+
+    public static int CountLf(byte[] buffer, int count)
+    {
+        int n = 0;
+        for (int k = 0; k < count; k++) { if (buffer[k] == 10) n++; }
+        return n;
+    }
 }
 '@
+}
+
+function Invoke-BusClear {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Write-BusError 'clear: -Path is required.'
+        return 2
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $mutex = New-Object System.Threading.Mutex($false, $script:MutexName)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne($script:MutexWaitMs)
+        }
+        catch {
+            $ex = $_.Exception
+            if ($ex -is [System.Threading.AbandonedMutexException] -or
+                $ex.InnerException -is [System.Threading.AbandonedMutexException]) {
+                $acquired = $true
+            }
+            else {
+                throw
+            }
+        }
+        if (-not $acquired) {
+            Write-BusError "clear: timed out after $($script:MutexWaitMs) ms waiting for mutex $($script:MutexName); nothing changed."
+            return 3
+        }
+
+        $dir = [System.IO.Path]::GetDirectoryName($fullPath)
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            [void](New-Item -ItemType Directory -Path $dir -Force)
+        }
+
+        $archived = $null
+        if ([System.IO.File]::Exists($fullPath)) {
+            $archiveDir = Join-Path $dir 'archive'
+            if (-not (Test-Path -LiteralPath $archiveDir)) {
+                [void](New-Item -ItemType Directory -Path $archiveDir -Force)
+            }
+            # Names sort by time, so a taken name moves on by a millisecond rather than gaining a suffix.
+            $stamp = [DateTime]::UtcNow
+            do {
+                $archived = Join-Path $archiveDir ('bus-' + $stamp.ToString('yyyyMMdd\THHmmssfff\Z') + '.jsonl')
+                $stamp = $stamp.AddMilliseconds(1)
+            } while ([System.IO.File]::Exists($archived))
+            [System.IO.File]::Move($fullPath, $archived)
+        }
+
+        $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+        $stream = New-Object System.IO.FileStream($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, $share)
+        $stream.Dispose()
+
+        if ($archived) { [Console]::Out.WriteLine($archived); [Console]::Out.Flush() }
+        return 0
+    }
+    catch {
+        Write-BusError "clear: $($_.Exception.Message)"
+        return 1
+    }
+    finally {
+        if ($acquired) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+# Prints the complete lines of $Stream from $Offset to its current end; returns the new offset.
+# An unfinished final line is left unread (the caller decides what that means).
+function Read-BusLines {
+    param($Stream, [long]$Offset, $Writer, $Utf8)
+
+    $length = $Stream.Length
+    while ($Offset -lt $length) {
+        $want = [int][Math]::Min([long]$script:ReadBuffer.Length, $length - $Offset)
+        [void]$Stream.Seek($Offset, [System.IO.SeekOrigin]::Begin)
+        $got = 0
+        while ($got -lt $want) {
+            $n = $Stream.Read($script:ReadBuffer, $got, $want - $got)
+            if ($n -le 0) { break }
+            $got += $n
+        }
+        $lastLf = [BusNative]::LastLf($script:ReadBuffer, $got)
+        if ($lastLf -lt 0) {
+            if ($got -eq $script:ReadBuffer.Length -and $got -lt ($length - $Offset)) {
+                # A single line longer than the buffer: grow it and re-read.
+                $script:ReadBuffer = New-Object byte[] ($script:ReadBuffer.Length * 2)
+                continue
+            }
+            break   # unfinished line
+        }
+        $Writer.Write($Utf8.GetString($script:ReadBuffer, 0, $lastLf + 1))
+        $Offset += $lastLf + 1
+    }
+    return [long]$Offset
+}
+
+# After a clear: finds the archive whose file id is $OldId (a move keeps the id), reads it from
+# $OldOffset to its end, then any archive made after it (several clears between two passes) from 0.
+# $CurrentId is the live file, which is read by the caller and so is never drained here.
+# Returns $false when no archive carries $OldId (nothing is printed then).
+function Read-BusArchives {
+    param([string]$FullPath, [string]$OldId, [long]$OldOffset, [string]$CurrentId, $Writer, $Utf8)
+
+    $archiveDir = Join-Path ([System.IO.Path]::GetDirectoryName($FullPath)) 'archive'
+    if (-not (Test-Path -LiteralPath $archiveDir)) { return $false }
+
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $files = [System.IO.Directory]::GetFiles($archiveDir, 'bus-*.jsonl')
+    [Array]::Sort($files, [System.StringComparer]::Ordinal)
+
+    $start = -1
+    for ($i = $files.Length - 1; $i -ge 0; $i--) {
+        $fs = $null
+        try {
+            $fs = New-Object System.IO.FileStream($files[$i], [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share, 1)
+            if ([BusNative]::FileId($fs.SafeFileHandle) -eq $OldId) { $start = $i }
+        }
+        catch [System.IO.IOException] { }
+        finally { if ($null -ne $fs) { $fs.Dispose() } }
+        if ($start -ge 0) { break }
+    }
+    if ($start -lt 0) { return $false }
+
+    for ($i = $start; $i -lt $files.Length; $i++) {
+        $fs = New-Object System.IO.FileStream($files[$i], [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share, 1)
+        try {
+            if ($i -gt $start -and [BusNative]::FileId($fs.SafeFileHandle) -eq $CurrentId) { continue }
+            $from = if ($i -eq $start) { $OldOffset } else { 0L }
+            $end = Read-BusLines $fs $from $Writer $Utf8
+            if ($end -lt $fs.Length) {
+                Write-BusError "tail: archive $($files[$i]) ends in an unfinished line ($($fs.Length - $end) bytes); skipped."
+            }
+        }
+        finally {
+            $fs.Dispose()
+        }
+    }
+    return $true
 }
 
 function Invoke-BusTail {
@@ -221,8 +388,7 @@ function Invoke-BusTail {
     $offset = 0L
     $started = $false
     $missedAtStart = $false
-    $chunkSize = 1048576
-    $buffer = New-Object byte[] $chunkSize
+    $script:ReadBuffer = New-Object byte[] 1048576
 
     try {
         while ($true) {
@@ -252,7 +418,10 @@ function Invoke-BusTail {
                             $offset = if ($missedAtStart) { 0L } else { $length }
                         }
                         elseif ($actualId -ne $fromId) {
-                            Write-BusError "tail: file id is $actualId, expected $fromId; the file was replaced. Restarting at offset 0."
+                            # A restored position can point at a file that a clear has since archived.
+                            if (-not (Read-BusArchives $fullPath $fromId $fromOffset $actualId $writer $utf8)) {
+                                Write-BusError "tail: file id is $actualId, expected $fromId; the file was replaced. Restarting at offset 0."
+                            }
                         }
                         elseif ($length -lt $fromOffset) {
                             Write-BusError "tail: file is $length bytes, below offset $fromOffset; the file was cleared. Restarting at offset 0."
@@ -262,9 +431,15 @@ function Invoke-BusTail {
                         }
                     }
                     elseif ($actualId -ne $id -or $length -lt $offset) {
-                        # F-014 / ADR-006: here a cleared bus is renamed to an archive; the unread tail of
-                        # the archived file must be read to its end before restarting. Not done in F-003.
-                        Write-BusError "tail: file id or size changed (id $id -> $actualId, size $length, offset $offset). Restarting at offset 0."
+                        # F-014 / ADR-006: a clear moves the bus into archive\; its unread tail is read to
+                        # its end before the new file is read from 0.
+                        $followed = $false
+                        if ($actualId -ne $id) {
+                            $followed = Read-BusArchives $fullPath $id $offset $actualId $writer $utf8
+                        }
+                        if (-not $followed) {
+                            Write-BusError "tail: file id or size changed (id $id -> $actualId, size $length, offset $offset). Restarting at offset 0."
+                        }
                         $id = $actualId
                         $offset = 0L
                         $emitPos = $true
@@ -274,27 +449,7 @@ function Invoke-BusTail {
                     if ($emitPos) { $writer.Write("#pos ${id}:$offset`n"); $writer.Flush() }
 
                     $startOffset = $offset
-                    while ($offset -lt $length) {
-                        $want = [int][Math]::Min([long]$buffer.Length, $length - $offset)
-                        [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                        $got = 0
-                        while ($got -lt $want) {
-                            $n = $fs.Read($buffer, $got, $want - $got)
-                            if ($n -le 0) { break }
-                            $got += $n
-                        }
-                        $lastLf = [BusNative]::LastLf($buffer, $got)
-                        if ($lastLf -lt 0) {
-                            if ($got -eq $buffer.Length -and $got -lt ($length - $offset)) {
-                                # A single line longer than the buffer: grow it and re-read.
-                                $buffer = New-Object byte[] ($buffer.Length * 2)
-                                continue
-                            }
-                            break   # unfinished line: wait for the rest
-                        }
-                        $writer.Write($utf8.GetString($buffer, 0, $lastLf + 1))
-                        $offset += $lastLf + 1
-                    }
+                    $offset = Read-BusLines $fs $offset $writer $utf8
                     if ($offset -ne $startOffset) { $writer.Write("#pos ${id}:$offset`n") }
                     $writer.Flush()
                 }
@@ -311,9 +466,88 @@ function Invoke-BusTail {
     }
 }
 
+function Invoke-BusLast {
+    param([string]$Path, [string]$Count)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        Write-BusError 'last: -Path is required.'
+        return 2
+    }
+    $want = 0
+    if (-not [int]::TryParse($Count, [System.Globalization.NumberStyles]::None,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$want) -or $want -lt 1) {
+        Write-BusError 'last: -Count is required and must be a positive integer.'
+        return 2
+    }
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not [System.IO.File]::Exists($fullPath)) { return 0 }
+
+    Initialize-BusNative
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $chunkSize = 65536
+    try {
+        $fs = New-Object System.IO.FileStream($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share, 1)
+        try {
+            $pos = $fs.Length
+            $chunks = New-Object 'System.Collections.Generic.List[byte[]]'
+            $lfs = 0
+            # want + 1 line ends: the first line of a mid-file slice may be cut, and is dropped.
+            while ($pos -gt 0 -and $lfs -lt ($want + 1)) {
+                $size = [int][Math]::Min([long]$chunkSize, $pos)
+                $pos -= $size
+                [void]$fs.Seek($pos, [System.IO.SeekOrigin]::Begin)
+                $buf = New-Object byte[] $size
+                $got = 0
+                while ($got -lt $size) {
+                    $n = $fs.Read($buf, $got, $size - $got)
+                    if ($n -le 0) { break }
+                    $got += $n
+                }
+                $chunks.Insert(0, $buf)
+                $lfs += [BusNative]::CountLf($buf, $got)
+            }
+        }
+        finally {
+            $fs.Dispose()
+        }
+
+        $total = 0
+        foreach ($c in $chunks) { $total += $c.Length }
+        $all = New-Object byte[] $total
+        $at = 0
+        foreach ($c in $chunks) {
+            [Buffer]::BlockCopy($c, 0, $all, $at, $c.Length)
+            $at += $c.Length
+        }
+
+        $lastLf = [BusNative]::LastLf($all, $all.Length)
+        if ($lastLf -lt 0) { return 0 }
+
+        $parts = $utf8.GetString($all, 0, $lastLf + 1).Split([char]10)
+        $lineCount = $parts.Length - 1
+        $first = if ($pos -gt 0) { 1 } else { 0 }
+        $first = [Math]::Max($first, $lineCount - $want)
+
+        try { [Console]::OutputEncoding = $utf8 } catch { }
+        $writer = New-Object System.IO.StreamWriter([Console]::OpenStandardOutput(), $utf8, 65536)
+        $writer.NewLine = "`n"
+        for ($i = $first; $i -lt $lineCount; $i++) { $writer.Write($parts[$i] + "`n") }
+        $writer.Flush()
+        return 0
+    }
+    catch {
+        Write-BusError "last: $($_.Exception.Message)"
+        return 1
+    }
+}
+
 $verbs = @{
     'append' = { Invoke-BusAppend -Path $Path -LineBase64 $LineBase64 }
+    'clear'  = { Invoke-BusClear -Path $Path }
     'tail'   = { Invoke-BusTail -Path $Path -From $From }
+    'last'   = { Invoke-BusLast -Path $Path -Count $Count }
 }
 
 if ([string]::IsNullOrEmpty($Verb) -or -not $verbs.ContainsKey($Verb)) {

@@ -1,3 +1,10 @@
+export type RosterRow = {
+  name: string
+  role: 'hub' | 'worker'
+  account: string
+  lastSeen: string
+}
+
 export type ListenerPos = { fileId: string; offset: number }
 
 // What a reloaded mod needs to take its join back up: the module's variables
@@ -19,6 +26,8 @@ declare module 'claude-code' {
       // The last delivered line ids, oldest first (bounded; see hooks/inbox.ts).
       seenIds: string[]
       joined: JoinedIdentity | null
+      // The Hub's live-session list, drawn by its pane (F-012).
+      roster: Shaped<RosterRow[]>
     }
   }
 }

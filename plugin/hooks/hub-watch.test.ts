@@ -425,6 +425,7 @@ test('restore starts a watcher for a worker only', async () => {
             }
           },
         }),
+        folder: FOLDER,
         helper: 'bus.ps1',
         busPath: 'bus.jsonl',
         waitMs: () => new Promise<void>(() => {}),

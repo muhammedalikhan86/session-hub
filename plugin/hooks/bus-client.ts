@@ -80,3 +80,49 @@ export const ensureBusFile = (run: RunFn, busPath: string): Promise<void> =>
 
 export const removeFile = (run: RunFn, path: string): Promise<void> =>
   runWithPath(run, REMOVE_FILE_SCRIPT, path)
+
+export const clearArgv = (helper: string, busPath: string): string[] => [
+  'powershell.exe',
+  '-NoProfile',
+  '-NonInteractive',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  helper,
+  'clear',
+  '-Path',
+  busPath,
+]
+
+// Returns the archive path (empty when there was no log to archive). Throws on a
+// non-zero exit (1 I/O, 3 mutex timeout, nothing changed).
+export const clearBus = async (
+  run: RunFn,
+  helper: string,
+  busPath: string,
+): Promise<string> => {
+  const out = await run(clearArgv(helper, busPath), { timeoutMs: 15000 })
+
+  if (out.exitCode !== 0) {
+    throw new Error(
+      `bus clear failed (exit ${out.exitCode}): ${out.stderr.trim() || out.stdout.trim()}`,
+    )
+  }
+
+  return out.stdout.trim()
+}
+
+export const lastArgv =(helper: string, busPath: string, count: number): string[] => [
+  'powershell.exe',
+  '-NoProfile',
+  '-NonInteractive',
+  '-ExecutionPolicy',
+  'Bypass',
+  '-File',
+  helper,
+  'last',
+  '-Path',
+  busPath,
+  '-Count',
+  String(count),
+]

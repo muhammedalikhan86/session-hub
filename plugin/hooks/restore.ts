@@ -4,7 +4,7 @@ import { READY_TIMEOUT_MS, statusFor } from './join'
 import type { JoinDeps, JoinState } from './join'
 import { startListener, tailArgv } from './listener'
 import type { Listener } from './listener'
-import { isLive, parsePresence } from './presence'
+import { isLive, parsePresence, presencePath } from './presence'
 import type { Heartbeat } from './heartbeat'
 import type { HubWatch } from './hub-watch'
 
@@ -13,6 +13,8 @@ export type RestoreDeps = Pick<
   'read' | 'now' | 'spawn' | 'helper' | 'waitMs' | 'onLine' | 'onPos'
 > & {
   busPath: string
+  folder: string
+  log?: (text: string) => void
   storedPos?: ListenerPos | null
   sessionId: string
   startHeartbeat: (id: HeartbeatIdentity) => Heartbeat
@@ -84,10 +86,22 @@ export const restoreJoin = async (
 ): Promise<RestoreResult> => {
   if (!stored || state.joined) return 'none'
 
+  // A join made under another shared folder belongs to a different hub.
+  const path = presencePath(deps.folder, stored.name)
+
+  if (stored.presencePath.toLowerCase() !== path.toLowerCase()) {
+    deps.log?.(
+      `session-hub: dropping stored join "${stored.name}": it was made under another shared folder`,
+    )
+    await deps.clearStored()
+
+    return 'dropped'
+  }
+
   let held: ReturnType<typeof parsePresence>
 
   try {
-    held = parsePresence(await deps.read(stored.presencePath))
+    held = parsePresence(await deps.read(path))
   } catch {
     return 'none'
   }
@@ -112,7 +126,7 @@ export const restoreJoin = async (
     sessionId: stored.sessionId,
     account: stored.account,
     startedAt: stored.startedAt,
-    path: stored.presencePath,
+    path,
   })
   deps.setStatus(statusFor(held))
 

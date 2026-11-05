@@ -475,6 +475,7 @@ const restoreRig = (file: string | undefined) => {
         }
       },
     }),
+    folder: FOLDER,
     helper: 'bus.ps1',
     busPath: 'bus.jsonl',
     waitMs: () => new Promise<void>(() => {}),
