@@ -50,6 +50,19 @@ file it was on (by its new name) and then starts the new file from 0.
 - Harder: readers track a file ID as well as an offset; the archive folder grows until someone
   deletes old archives (acceptable: the PRD keeps history until the person clears it).
 
+## Implementation note (2026-11-04, F-014 built; Decision unchanged)
+The Decision stands as written. The built `bus.ps1 clear` and `tail` refine two details:
+- "reads to the end of the archived file it was on (by its new name)": a reader does not know the new name, so
+  `tail` finds the archive by **file id** (a move on the same volume keeps the NTFS id): it scans
+  `archive\bus-*.jsonl` for the file whose id equals the id it was reading, reads it from its stored offset to its
+  end, then reads any later archive from 0 (several clears between two passes), then the new file from 0. With no
+  archive carrying that id it warns on stderr and restarts at 0.
+- Only complete lines are drained: an unfinished last line in an archive can never be completed (no writer holds
+  it any more), so it is skipped with a warning.
+Archive names are `bus-<UTC yyyyMMddTHHmmssfffZ>.jsonl`; a taken name moves on by a millisecond, so names sort by
+time. A clear writes nothing to the new log. Proven by `plugin/tests/bus.clear.Tests.ps1` and the F-017 stress
+proof (`plugin/tests/stress/concurrency.ps1`, 10 iterations with a clear mid-run).
+
 ## Related
 - Architecture section: 3 Bus helper, 4 Data Flow, NFR-003
 - Supersedes: ADR-002

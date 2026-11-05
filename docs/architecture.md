@@ -1,7 +1,7 @@
 # Architecture: Session Hub — talking between Claude Code sessions
 
 > Status: APPROVED
-> Version: v8
+> Version: v10
 > Last updated: 2026-11-04
 > PRD: docs/prd.md (built against v4)
 
@@ -83,38 +83,56 @@ the heartbeat recreates it.
   line entry and a pane.
 - **Dependencies:** Bus helper, shared folder, Claude Code mod engine.
 - **Technology:** Claude Code mod (hooks module, TypeScript), see ADR-004, ADR-005.
-- **Parts (all under `plugin/hooks/`), built through Phase 3:** `presence.ts` (name free/stale/claim
+- **Parts (all under `plugin/hooks/`), built through Phase 5 (F-015):** `presence.ts` (name free/stale/claim
   rules and the race re-read), `join.ts` (the join sequence, with `ensureBusFile` before the listener,
   plus the join/leave guards and `JoinState`), `listener.ts` (spawns `bus.ps1 tail` and splits
   lines), `bus-client.ts` and `bus-scripts.ts` (append, ensure-file and remove-file through
   `$.process.run`), `heartbeat.ts` (10 s presence rewrite), `leave.ts` (release, `endSession`,
-  `completeJoin`, `markLost`), `restore.ts` (take a join back up after a mod reload),
+  `completeJoin`, `markLost`), `restore.ts` (take a join back up after a mod reload, or drop it if the shared folder changed), `paths.ts` (the one place the shared folder is resolved: `parseSharedFolderOption`, `configureSharedFolder`, `resolveSharedFolder`, default `sharedFolderFor`),
   `hub-watch.ts` (workers only: is the Hub away), `send.ts` (the `send` tool: `handleSend`, schema,
   description), `inbox.ts` (the listener filter: seen ids, hold buffer during a join, ordered
   position store), `deliver.ts` (`routeMessage`: frames and notices; `makeIsFromLiveHub`: the
-  authority check) and `register.ts` (wires the commands, the `send` tool at `session.start`, the
-  `tool.call` hook for it, and `session.start` / `session.end`). Shared types for the stored state
-  (`seenIds`, `listenerPos`) are in `plugin/types/index.d.ts`.
+  authority check). Phase 4 adds `roster.ts` (the Hub's live session list: pure build from presence
+  files, `join`/`leave` line updates, the 10 s refresh), `roster-pane.tsx` (the pane `session-hub-roster`,
+  titled "Sessions"), `list-sessions.ts` (the Hub-only `list_sessions` tool), `history.ts`
+  (`/hub-history`: count rules and the formatter), `clear.ts` (`/hub-clear`, Hub only) and
+  `hub-prompt.ts` (the `prompt.compose` section for a joined session, B-001). `register.ts` wires
+  all of it: the commands, the `send` and `list_sessions` tools at `session.start`, the `tool.call`
+  hooks for them, a `tool.describe` hook per tool that pins `isDeferred: false`, the `prompt.compose`
+  hook, the pane's `ui.render` hook, and `session.start` / `session.end`. `register.ts` has no unit
+  test; it is proven only by a live run. Shared types for the stored state (`seenIds`, `listenerPos`)
+  and the roster (`RosterRow`, atom `session-hub.roster`, shape `roster-1`) are in
+  `plugin/types/index.d.ts`.
 
 ### Bus helper (`bus.ps1`, shipped inside the mod)
-- **Responsibility:** The only code that touches `bus.jsonl`. Three verbs, all per ADR-006
-  (built so far: `append` and `tail`, Phase 1; `clear` and following a clear land in F-014, Phase 4):
+- **Responsibility:** The only code that touches `bus.jsonl`. Four verbs, all per ADR-006
+  (all built, Phases 1 and 4):
   `append` (takes the bus mutex, writes one whole line, flushes, releases),
-  `clear` (takes the bus mutex, moves the file into `archive\`, starts an empty one) and
+  `clear` (takes the bus mutex, moves the file into `archive\bus-<UTC yyyyMMddTHHmmssfffZ>.jsonl`, starts
+  an empty one, prints the archive path),
   `tail -From <file id>:<byte offset>|end` (polls about once a second, prints only complete
-  newline-ended lines, follows a clear into the new file, runs forever). `end` starts at the
+  newline-ended lines, follows a clear by draining the archive, runs forever) and
+  `last -Count <n>` (read-only, no mutex: reads backwards from the end in 64 KiB chunks and prints the
+  last n complete lines, oldest first; used by `/hub-history`). `end` starts at the
   current end of the file, or at 0 if the file does not exist yet.
 - **Inputs:** append: `-Path` and `-LineBase64` (base64 of one UTF-8 JSON line, with no LF or CR).
-  tail: `-Path` and `-From`. The file id is the NTFS file identity, written in hex as
-  `<volume serial>-<index high><index low>`.
+  tail: `-Path` and `-From`. clear: `-Path`. last: `-Path` and `-Count` (a positive integer). The file id
+  is the NTFS file identity, written in hex as `<volume serial>-<index high><index low>`.
 - **Outputs:** append writes the line plus a newline (LF) and prints nothing; it exits 0 (ok), 1 (I/O error),
   2 (bad input) or 3 (mutex timeout, nothing written). tail prints each bus line as it is, plus
   `#pos <file id>:<offset>` lines at start and after each batch, so the mod can store where it is.
-  Bus lines start with `{`, so `#pos` lines cannot be mistaken for them. If the file id changes or
-  the file shrinks below the offset, tail warns on stderr and restarts at 0 (reading the archived
-  file first lands in F-014).
+  Bus lines start with `{`, so `#pos` lines cannot be mistaken for them. clear exits 0 (printing the
+  archive path, or nothing when there was no file), 1, 2 or 3 as append does (3: nothing changed). last
+  prints the lines and exits 0 (also for a missing file, with no output) or 2 for a bad `-Count`.
+  **Following a clear (F-014):** if the file id at `-Path` differs from the one tail was reading, it
+  finds the archive whose NTFS file id equals the old id (a move on one volume keeps the id), prints
+  that archive's complete lines from the stored offset to its end, then any later archive from 0 (several
+  clears between two passes), then reads the live file from 0 and prints `#pos <new id>:0`. An unfinished
+  last line in an archive can never be completed, so it is skipped with a warning on stderr. With no
+  archive carrying the old id, or a size below the offset under the same id, tail warns on stderr and
+  restarts at 0.
 - **Dependencies:** Windows PowerShell, which every Windows 11 machine has.
-- **Technology:** PowerShell script run by `$.process.run` (append; clear from F-014) and `$.process.spawn`
+- **Technology:** PowerShell script run by `$.process.run` (append, clear, last) and `$.process.spawn`
   (tail); writers serialised by the named mutex `Local\ClaudeSessionHubBus`. See ADR-006
   (supersedes ADR-002). Tests use Pester 6.2 under PowerShell 7; the helper itself runs on
   Windows PowerShell 5.1.
@@ -123,7 +141,8 @@ the heartbeat recreates it.
 - **Responsibility:** The meeting place. Holds `bus.jsonl`, `presence\` and `archive\` (cleared logs).
 - **Inputs / Outputs:** Files only.
 - **Dependencies:** None.
-- **Technology:** Plain files, see ADR-001 and ADR-003. Path can be changed by a mod option.
+- **Technology:** Plain files, see ADR-001 and ADR-003.
+- **Path (F-015, FR-016):** the default is `%USERPROFILE%\.claude-session-hub`. The mod option `sharedFolder` (`userConfig` in `plugin.json`, "Shared folder") overrides it. `register(on, options)` passes the raw value to `configureSharedFolder` (`paths.ts`), which validates it: blank or unset means the default; anything else must be an absolute Windows path (drive letter or UNC), with `/` turned into `\` and trailing slashes dropped. A value that is not text, is relative, or is root-only (`C:`, `C:\`) is ignored: the default is used and `session.start` shows a one-line toast warning (`Session Hub: the sharedFolder option ... the default folder is used`). `resolveSharedFolder` returns the configured folder, else the default; every caller (bus, presence, archive paths) goes through it. A reload runs `register` again, so the option is read afresh. Every account must use the same value, or each gets its own folder and they never see one another.
 
 ### Presence store (`presence\<name>.json`)
 - **Responsibility:** Who is alive, and who holds which name. One file per session:
@@ -202,7 +221,44 @@ the Hub, `kind` is `order` and `to` must be a session name or `*` (not `Hub` its
 is always `Hub`, `kind` is `reply` and `replyTo` is passed through when given. The line is appended
 through `bus.ps1 append`; a refusal or a failed append (any non-zero exit: 1, 2 or 3) returns an error starting "Not
 sent" to the model, and success returns the message id. The tool description tells the model never to
-send secrets. The tool is not marked `isDeferred`, so the model finds it through its tool search.
+send secrets. The tool is registered with `isDeferred: false` and a `tool.describe` hook answers
+`isDeferred: false` too, so its schema is in the prompt's tool list rather than behind tool search (B-001,
+below).
+
+### Model guidance for a joined session (B-001)
+
+The model had used Claude Code's built-in session messaging instead of `send`, because the tool sat behind
+tool search and nothing said the session was in Session Hub. Two parts: the `isDeferred: false` pinning above,
+and a `prompt.compose` hook (`hub-prompt.ts`) that, only while the session is joined, appends one
+`session`-scope section `session-hub:joined`. It names the session and its role, says to use
+`mcp__session-hub__send` (Hub: `to` a name or `*`; worker: the Hub only, `replyTo` the order id) and not the
+built-in messaging, tells the Hub about `list_sessions`, says that prompts starting `[Hub order ...]`,
+`[Reply from ...]` or `[Message from ...]` come from Session Hub, and says never to send secrets. The hook
+is not cached, so a join, leave, lost name or restore shows on the next turn; a failure in it falls back to
+the engine's own prompt. Whether the model now picks `send` is a live check (B-001, with the user).
+
+### The Hub's session list: pane and `list_sessions` (FR-011, F-012)
+
+Only the Hub runs the roster; it starts and stops with the Hub's heartbeat (join, restore; leave,
+`session.end`, lost name). The live `presence\*.json` files are the source of truth for name, role, account and
+last seen: a session whose file is missing, malformed or 30 s or older is dropped, the Hub included. Every 10 s
+(and once at start) the roster is rebuilt from the files and written to the atom `session-hub.roster`
+(`RosterRow[]`, shape `roster-1`). Between refreshes a `join` or `leave` line the Hub's inbox delivers updates it at
+once (a joined row shows account `unknown` until the next refresh). A session whose `leave` line was applied stays
+out of refreshes until its file is gone or another `join` for that name arrives; the mark is keyed by session id so
+a superseded session's `leave` cannot hide the session that now holds the name. The pane `session-hub-roster`
+("Sessions") draws the atom: name, role, account, last seen. `list_sessions` (no input) re-reads `presence\`
+and returns the same rows as JSON with a `lastSeenAgo` text; a worker is refused ("only the Hub can list
+sessions") and so is an unjoined session. Both share the same leave-mark set, so they agree.
+
+### `/hub-history` (FR-013, F-013)
+
+`/hub-history [count]` shows the last messages, oldest first, one row each: `HH:MM:SS from → to kind: first line of
+body` (local time, first line cut at 100 characters). Default 50, at most 500 (a larger count is capped and the
+reply says so; zero or a non-number gets a usage line). Lines that are not valid messages are skipped and counted
+in a footer; an empty or missing log says "No messages yet." and gives the path. It reads the shared log through
+`bus.ps1 last` (the mod API cannot read a file over 4 MiB), so it works whether or not the session has joined and
+costs the last lines, not the file size. The full log stays a plain file.
 
 ### Delivery and the Hub authority check
 
@@ -283,7 +339,7 @@ stateDiagram-v2
 - **Restore after a mod reload:** module variables are lost but `$.state` still says joined. On
   `session.start`, `restoreJoin` takes the join back up only if the presence file still holds this
   session's id, matches the stored id and is fresh: it restarts the heartbeat (and the Hub watcher
-  for a worker) and the status line. Otherwise it clears the stored join. The listener is restarted
+  for a worker) and the status line. Otherwise it clears the stored join. A stored join whose presence path is under a different shared folder than the one now resolved (compared case-insensitively) is also dropped, never restored: it belongs to another hub (F-015). The listener is restarted
   from the stored `listenerPos` (from `end` when nothing is stored), with the stored seen ids, so a
   reload neither replays nor skips lines. If that listener cannot start or reports no position within
   the ready timeout, the join and heartbeat stay and the status line says so.
@@ -295,10 +351,15 @@ stateDiagram-v2
   when the Hub returns. Away is only a flag (`JoinState.hubAway`): nothing is stopped, so a worker
   keeps doing whatever is already queued, then simply has nothing new to do. The watcher stops
   wherever the heartbeat stops (leave, session end, lost name).
-- **Clear:** `/hub-clear` (Hub only), under the bus mutex, moves `bus.jsonl` to
-  `archive\bus-<UTC timestamp>.jsonl` and starts an empty one. Each listener sees the file id
-  change, finishes reading the archived file to its end, then starts the new file from 0, so no
-  message sent around a clear is lost (ADR-006).
+- **Clear (FR-014, F-014):** `/hub-clear` (Hub only; a worker gets "Only the Hub can clear the log.", an
+  unjoined session "Join as Hub first."), through `bus.ps1 clear` under the bus mutex, moves `bus.jsonl` to
+  `archive\bus-<UTC timestamp>.jsonl` and starts an empty one. The reply is "Cleared. Archived to <path>." (or
+  "Cleared. There was no log to archive."), or "Could not clear the log: ..." with nothing changed. The new
+  log starts empty: no line, notice or `leave`/`info` message is written or sent after a clear, and workers are
+  not told. Each listener sees the file id change, drains the archived file to its end, then starts the new
+  file from 0 (see the Bus helper), so no message sent around a clear is lost (ADR-006). The listener stores the
+  `#pos` tail prints on the new file id only after the drained lines were handled, and seen ids drop any line
+  seen twice.
 
 ## 5. Functional Requirements
 
@@ -327,7 +388,7 @@ stateDiagram-v2
 |----|----------|-------------|-------|
 | NFR-001 | Performance | A line appended is seen by every listening session within 5 s | The tail checks about once a second |
 | NFR-002 | Performance | Presence list is at most 30 s old | 10 s heartbeat, 30 s stale limit |
-| NFR-003 | Reliability | No line lost, torn, half-read or missed when several sessions append at once, or around a clear | ADR-006 |
+| NFR-003 | Reliability | No line lost, torn, half-read or missed when several sessions append at once, or around a clear | ADR-006. Proven by F-017: `plugin/tests/stress/concurrency.ps1` (10 iterations of 5 writers x 200 lines, 3 real tail listeners, one clear mid-run; every line once, in file order, none torn); `plugin/tests/concurrency.Tests.ps1` runs one iteration in the Pester suite |
 | NFR-004 | Reliability | No message acted on twice; a reload does not replay | Offset + seen ids in `$.state` |
 | NFR-005 | Safety | Only the live Hub's orders are acted on; `from` cannot be set by the model | ADR-005. Guards against accidents, not against a hostile program running as the same Windows user |
 | NFR-006 | Safety | No secrets on the bus | PRD constraint. The `send` tool description tells the model so |
@@ -370,3 +431,5 @@ stateDiagram-v2
 | v6 | 2026-11-04 | Synced with Phase 1 build: `kind` list adds join/leave; risk A7 resolved by F-001; Bus helper inputs/outputs (`-LineBase64`, exit codes, `#pos` lines, `-From end`, file id format); Pester 6.2; session-name rule (1 to 32 of `A-Z a-z 0-9 _ -`); ADR-003 amended: join/leave have their own kinds; Bus helper marks `clear` and clear-following as F-014 | Triage edit | — |
 | v7 | 2026-11-04 | Synced with Phase 2 build (F-005 to F-007): join order now includes `ensureBusFile` and the 10 s listener ready timeout; heartbeat lost-name handling (`markLost`); leave order (heartbeat, Hub watcher, `leave` line, listener, presence file); release on `session.end` with `endedId`, the 500 ms join wait inside the 1.5 s bound, and `/clear` behaviour (no `session.start`); restore after a mod reload with the listener restart deferred to F-009; Hub watcher and its status text; Mod parts list; presence reads use `$.fs.exists` + `$.fs.read` | Triage edit | — |
 | v8 | 2026-11-04 | Synced with Phase 3 build (F-008 to F-011): the `send` tool (registration, stamping, Hub versus worker rules, errors); listener filter, seen ids, hold buffer during a join and ordered position store; delivery frames and notices; Hub authority check against a fresh `presence\Hub.json`; delivery order; restore now restarts the listener from `listenerPos`; Parts list extended | Triage edit | — |
+| v9 | 2026-11-04 | Synced with Phase 4 build (F-012, F-013, F-014, F-017, B-001): Bus helper now has four verbs (`last`, `clear` added) and tail drains the archive by file id; roster, pane and `list_sessions`; `/hub-history`; `/hub-clear` (new log starts empty, no notice); B-001 prompt section and `isDeferred: false` pinning; NFR-003 proof; Parts list extended | Triage edit | — |
+| v10 | 2026-11-04 | Synced with Phase 5 build (F-015): shared folder is a mod option (`userConfig.sharedFolder`) validated in `paths.ts` with a default fallback and a warning toast; restore drops a stored join made under a different shared folder; Parts list adds `paths.ts` | Integration doc sync | — |

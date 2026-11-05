@@ -6,6 +6,87 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased] - 2026-11-04
 
+Revision 5. Tranche v1, Phase 5.
+
+### feat
+
+- **F-015** `sharedFolder` mod option, shown in `/config`.
+  - Blank uses `%USERPROFILE%\.claude-session-hub`.
+  - An absolute drive or UNC path is used. `/` becomes `\` and trailing slashes are dropped.
+  - A relative or root-only value falls back to the default, with a warning toast at session start.
+  - Every account must use the same value.
+  - A join restored after the folder changed is dropped instead of heartbeating into the old folder.
+  - The README "Install (F-015)" section gives the per-account steps.
+
+### test
+
+- `paths.test.ts` (4).
+- Two new restore cases.
+
+### docs
+
+- **F-016** Three-account end-to-end checklist: test runbook §9 (TC-100..TC-107) with a results table. The run itself is manual and not yet done.
+- Architecture v10.
+- Test cases TC-110..TC-116.
+- Test runbook: a rule for a non-default shared folder in every section, and a §7.5 bad-value check.
+
+### Known limits
+
+- The plugin is not yet enabled, so there are no live checks of Phases 4-5 or B-001.
+- The F-016 run is pending.
+- The `sharedFolder` option's `register` wiring and warning toast are covered only by a manual case (TC-116).
+
+### Smoke tests
+
+- Not run live. The manual steps are in test runbook §7 and §9.
+
+## [Revision 4] - 2026-11-04
+
+Revision 4. Tranche v1, Phase 4.
+
+### fix
+
+- **B-001** The Hub model used Claude Code's built-in session list instead of the send tool.
+  - The send tool is now always loaded (`isDeferred: false`), pinned via `tool.describe`.
+  - A joined session gets a short prompt section that names `mcp__session-hub__send`, its role, `*` broadcast and `list_sessions` (Hub), and says never to send secrets.
+  - Live check still pending.
+
+### feat
+
+- **F-012** Hub "Sessions" pane and a Hub-only `list_sessions` tool.
+  - Rows come from live presence files only. Entries stale for 30 s or more are dropped.
+  - The Hub is listed first, then by name. Refreshed every 10 s.
+  - A leave hides only the leaving session's id.
+- **F-013** `/hub-history [N]` (default 50, max 500) shows `HH:MM:SS from → to kind: first line`. The body is cut at 100 characters.
+  - Backed by a new read-only `bus.ps1 last` verb. It takes no lock, reads backwards in 64 KiB chunks, and returns complete lines only.
+- **F-014** `/hub-clear` (Hub only) archives `bus.jsonl` to `archive\bus-<UTC>.jsonl` under the bus mutex, then starts an empty log. No notice is written.
+  - Listeners drain the archived file (found by its NTFS file id) to its end, then read the new file from 0.
+
+### test
+
+- **F-017** Concurrency proof `plugin/tests/stress/concurrency.ps1`. 5 writers × 200 lines, 3 listeners, a clear mid-run, 10 iterations. Every listener gets every line exactly once, in order, and none are torn.
+  - The Pester wrapper runs 1 iteration.
+
+### docs
+
+- Architecture v9.
+- Test cases for Phase 4.
+- Test runbook §7 has the manual Phase 4 steps, and §8 the scripted proofs.
+- The README is updated.
+- ADR-006 has an implementation note.
+
+### Known limits
+
+- The plugin is not yet enabled, so there is no live check of Phase 4 or B-001.
+- The `register.ts` wiring has no unit test.
+- `/hub-history` shows only the current log, not archives.
+
+### Smoke tests
+
+- Not run live. The plugin is not yet enabled (see Known limits). The manual steps are in test runbook §7; the scripted proofs are in §8.
+
+## [Revision 3] - 2026-11-04
+
 Revision 3. Tranche v1, Phase 3.
 
 ### feat

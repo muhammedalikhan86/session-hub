@@ -1,7 +1,7 @@
 # Test Cases: Session Hub
 
-> Scope: Tranche v1, Phases 1 to 3 (F-001 to F-011). Later phases add their scenarios when they start.
-> PMBook: docs/project-management.md (v19)
+> Scope: Tranche v1, Phases 1 to 5 (F-001 to F-017, B-001). F-016 is a manual checklist that has not been run.
+> PMBook: docs/project-management.md (v24)
 
 Each scenario is concrete and runnable. "Auto" = covered by an automated test; "Manual" = a person
 must watch for it (permission prompts, mod enablement).
@@ -39,7 +39,7 @@ must watch for it (permission prompts, mod enablement).
 | TC-025 | Position lines | Tail a file; append lines | `#pos <fileid>:<offset>` printed at start and after each batch, offset = bytes consumed | Auto |
 | TC-026 | `-From end`, file missing or locked | Tail `-From end` on a missing file; on a briefly locked one | Missing: waits, then reads from 0 once it exists. Locked: still starts at its end | Auto |
 | TC-027 | Bad `-From` | Pass `-From` values that are not `<fileid>:<offset>` or `end` | Exit 2 with a message on stderr | Auto |
-| TC-028 | File replaced or shrunk | Tail from a different file id, or an offset above the file size | Warning on stderr; restarts at offset 0 (following an archive is F-014) | Auto |
+| TC-028 | File replaced or shrunk | Tail from a different file id with no archive carrying it, or an offset above the file size | Warning on stderr; restarts at offset 0 (following an archive is TC-0F5..0F9) | Auto |
 
 ## F-004 — Message model
 
@@ -131,7 +131,7 @@ These need real Claude Code sessions in separate accounts, which an automated ru
 | TC-097 | Multi-line body | `body` with a newline | Sent as one bus line (newline escaped) | Auto ("a body with a newline is sent") |
 | TC-098 | Append failure | The bus helper fails (any non-zero exit: 1, 2 or 3) | An error starting "Not sent" goes back to the model, never a success text | Auto ("an append failure is an error, never a success text") |
 | TC-099 | No secrets | Read the tool description | It tells the model never to send secrets (NFR-006) | Auto ("the description tells the model never to send secrets") |
-| TC-09A | Registered and callable in a real session | In a joined session ask the model to send a message; check `bus.jsonl` | The model finds `mcp__session-hub__send` (it is not `isDeferred`, so it must find it through its tool search), the call raises no permission prompt, and the line appears in `bus.jsonl` | Manual (not yet run). Covers the `register.ts` wiring |
+| TC-09A | Registered and callable in a real session | In a joined session ask the model to send a message; check `bus.jsonl` | The model calls `mcp__session-hub__send` (pinned with `isDeferred: false` since B-001, so no tool search is needed), the call raises no permission prompt, and the line appears in `bus.jsonl` | Manual (not yet run). Covers the `register.ts` wiring |
 
 ## F-009 — Listener
 
@@ -199,3 +199,94 @@ No automated test runs two real sessions: the unit tests above fake the mod engi
 | TC-0D7 | Reload then receive | Reload the mod in a joined worker, then send it an order | The listener resumes from the stored position; the order is received once; nothing already seen is replayed | Manual (not yet run) |
 | TC-0D8 | No permission prompt | Run TC-0D0 to TC-0D2 in the normal permission mode | No prompt in any session (NFR-009) | Manual (not yet run) |
 | TC-0D9 | Three accounts | Hub and two workers in three signed-in accounts | As TC-0D0 and TC-0D1 across accounts | Manual (not yet run). This is F-016 (Phase 4) |
+
+## B-001 — Model guidance for a joined session
+
+"Auto" = `plugin/hooks/hub-prompt.test.ts`, run by `claude plugin test plugin`. The `register.ts` wiring (the `tool.describe` and `prompt.compose` hooks) has no unit test; that the model then picks `send` is only proven by TC-0E2.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0E0 | Joined prompt section names the tool and role | Build the section for the Hub and for a worker | Names the session, says to use `mcp__session-hub__send` and not built-in session messaging, never to send secrets; the Hub is told `to` may be a name or `*` and about `list_sessions`; a worker is told it writes to the Hub only and to set `replyTo` | Auto (`hub-prompt.test.ts` "B-001: the joined prompt names the send tool and the session's role"; "F-012: only the Hub is told about list_sessions") |
+| TC-0E1 | Section only while joined, added last | Compose with and without a joined session | No section when not joined; one `session-hub:joined` section added last when joined, never duplicated | Auto ("B-001: no section is added when not joined, one is added last when joined") |
+| TC-0E2 | The model uses `send` in a real session | Join two sessions (plugin enabled). Ask the Hub's model, with no hint about tools: "Tell Reports to reply pong" | The model calls `mcp__session-hub__send`, not the built-in session messaging or session list; no tool-search step is needed first | Manual (not yet run). The user's live check of B-001 |
+
+## F-012 — Hub session list: pane and `list_sessions`
+
+"Auto" = `plugin/hooks/roster.test.ts` and `plugin/hooks/roster-pane.test.tsx`, run by `claude plugin test plugin`. The tests fake the mod engine; the pane in a real terminal and the `register.ts` wiring (start with the Hub's heartbeat, stop with it) are proven only by TC-0E8.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0E3 | Join and leave lines update the list at once | A `join` line, a `leave` line, and a `join` for a listed session | Added with the role its name implies (account `unknown`); removed; fields of a listed session kept | Auto (`roster.test.ts` "F-012: a join line adds…", "a leave line removes…", "a join line for a listed session keeps its fields") |
+| TC-0E4 | Presence files are the truth | A stale file, a live file, a file that disagrees with a join line, the Hub's own fresh file, a Hub file 40 s old | Stale dropped, live kept; the file overrides the guess; the Hub is listed with its real last seen and dropped at 40 s (never stamped "now") | Auto ("a stale presence file is removed…", "the presence file overrides…", "a fresh Hub file is listed…", "a Hub file 40 s old is dropped…") |
+| TC-0E5 | A leave is not undone by the leaving file | A refresh after a `leave` line while the file still exists; a `leave` from a superseded session id | The session stays out until its file is gone or a `join` arrives; a superseded session's leave does not hide the new owner of the name | Auto ("a refresh does not re-add a session whose leave was applied", "a leave from a superseded session does not hide the new owner of the name") |
+| TC-0E6 | Order, loading and refresh timer | Files in any order; non-`.json` and malformed files; ticks and stop | Hub first, then by name; only `.json` read, bad ones skipped; refresh runs at once, on each tick, not after stop | Auto ("the order is the Hub first…", "loading reads only the .json files…", "the refresh runs at once, on each tick, and not after stop") |
+| TC-0E7 | `list_sessions` and the pane render | Call as the Hub, as a worker, and unjoined; render the pane with and without sessions | The Hub gets the live rows as JSON; a worker and an unjoined session are refused; the pane lists name, role and account, or says "No live sessions." | Auto (`roster.test.ts` "list_sessions gives the Hub the live rows as JSON", "…refuses a worker", "…refuses a session that has not joined"; `roster-pane.test.tsx` 2 tests) |
+| TC-0E8 | Pane and tool in a real Hub | Plugin enabled. Join as Hub; join a worker; leave the worker; stop another worker uncleanly | The pane `Sessions` opens with the Hub, shows the worker within 10 s (at once on its `join` line), drops it on `leave`, and drops the crashed one within about 40 s; `list_sessions` called by the Hub model returns the same rows; the pane closes on `/hub-leave` | Manual (not yet run) |
+
+## F-013 — `/hub-history`
+
+"Auto" = `plugin/hooks/history.test.ts` (formatter and handler) and `plugin/tests/bus.last.Tests.ps1` (the `last` verb, real `bus.ps1`).
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0E9 | Last N, oldest first | `/hub-history` over a log of more than 50 messages | The last 50, oldest first, under a header naming the log path | Auto (`history.test.ts` "shows at most the last 50 messages…") |
+| TC-0EA | Row format | A reply, a broadcast, a multi-line body, a body over 100 characters, a malformed `ts` | `HH:MM:SS from → to kind: first line`; a broadcast reads naturally; only the first line shown; cut at 100 with `…`; a bad `ts` shows `??:??:??` | Auto ("a row is time, from -> to, kind and the body", "a broadcast and a single message read naturally", "only the first line of the body is shown…", "a long first line is cut…", "a malformed ts shows ??:??:??…") |
+| TC-0EB | Unreadable lines, empty log | A log with a line that is not a message; an empty or missing log | Skipped and counted in a footer; "No messages yet." plus the path | Auto ("an unreadable line is skipped and counted…", "an empty log says so and names the path") |
+| TC-0EC | Count rules and helper failure | No count, 0, `abc`, 9999 | Default 50; usage line for 0 and non-numbers; 9999 capped at 500 with a note; a helper failure is reported with its exit code | Auto ("the count defaults to 50…", "the command asks the helper for the last N lines…", "a capped count is announced, and a helper failure is reported") |
+| TC-0ED | `last` verb | N of more than N lines; fewer than N; missing and empty file; an unfinished last line; a file larger than one chunk; non-ASCII; a bad `-Count` | The last N complete lines oldest first; all of them when fewer; nothing and exit 0 for a missing or empty file; the unfinished line and a line cut by a chunk edge never printed; UTF-8 intact; exit 2 for a missing or non-positive count | Auto (`bus.last.Tests.ps1`, 7 tests) |
+| TC-0EE | `/hub-history` in a real session | Plugin enabled. Run `/hub-history` and `/hub-history 3` after a round trip, joined and unjoined | Rows match `bus.jsonl`; works without joining; no permission prompt | Manual (not yet run) |
+
+## F-014 — `/hub-clear`
+
+"Auto" = `plugin/hooks/clear.test.ts` (handler) and `plugin/tests/bus.clear.Tests.ps1` (the `clear` verb and `tail` following a clear, real `bus.ps1`).
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0F0 | Hub clears | The Hub runs `/hub-clear` | The helper is run with `clear`; the reply is `Cleared. Archived to <path>.`; **nothing is appended to the bus, so the new log is empty and workers get no notice** | Auto (`clear.test.ts` "F-014: the Hub clears…") |
+| TC-0F1 | Refusals | A worker, and an unjoined session, run `/hub-clear` | `Only the Hub can clear the log.` / `Join as Hub first.`; the helper is not run | Auto ("a worker is refused…", "a session that has not joined is refused") |
+| TC-0F2 | Helper failure, missing log | The helper fails; the log is missing | `Could not clear the log: …`; `Cleared. There was no log to archive.` | Auto ("a helper failure is reported", "a missing log is cleared with nothing to archive") |
+| TC-0F3 | `clear` verb | Clear a log with content; two clears in a row; a missing bus file; no `-Path`; the mutex held; a reader holding the file open | Content moved byte-exact to `archive\bus-<UTC timestamp>.jsonl` and an empty bus created; two distinct archive names; a missing file is just created (nothing printed, exit 0); exit 2 with no `-Path`; exit 3 after about 2 s with nothing moved; the move works while a reader holds the file open | Auto (`bus.clear.Tests.ps1` "bus.ps1 clear", 6 tests) |
+| TC-0F4 | Nothing lost around a clear | A tail running while the bus is cleared and written to | Every line printed once, in order (archive first, then the new file), then `#pos <new id>:0` | Auto (`bus.clear.Tests.ps1` "F-014 prints every line exactly once and in order across a clear…") |
+| TC-0F5 | Several clears between two passes | Two clears between two of tail's passes | Every archive is read, in order | Auto ("F-014 two clears between two passes…") |
+| TC-0F6 | Unfinished last line in the archive | A half-written last line in the archived file | Skipped with a warning on stderr; the rest is printed | Auto ("F-014 an unfinished last line in the archive is skipped…") |
+| TC-0F7 | Restart from an archived position | `tail -From <old id>:<offset>` after the file was archived | The rest of the archive, then the new file from 0 | Auto ("F-014 restart from an archived position…") |
+| TC-0F8 | No archive for the old id | A file id with no matching archive | Warns and restarts at 0 (as TC-028) | Auto ("F-014 with no archive for the old id…") |
+| TC-0F9 | `/hub-clear` in real sessions | Plugin enabled. Hub and a worker joined, a few messages sent, the Hub runs `/hub-clear`, then sends a new order | `archive\bus-<timestamp>.jsonl` holds the old lines; `bus.jsonl` is empty until the new order; the worker receives the new order once and replays no old one; a worker running `/hub-clear` is refused | Manual (not yet run) |
+
+## F-017 — Concurrency proof (NFR-003)
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-0FA | Full proof | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File plugin/tests/stress/concurrency.ps1` (10 iterations, about 2 min; serial, not beside a real hub) | Per iteration, in a fresh temp bus: 5 writer processes x 200 appends and one `clear` mid-run; archive plus live file hold all 1,000 lines once, each complete; each of 3 real tail listeners printed exactly 1,000 lines, valid JSON and uncorrupted, none duplicated or missing, each writer's sequence increasing, the whole sequence equal to file order. 10 of 10 PASS lines, exit 0 | Auto (script run by hand; exit 1 on any failure) |
+| TC-0FB | One iteration in the suite | `Invoke-Pester plugin/tests -CI` | One iteration passes (about 12 s) | Auto (`plugin/tests/concurrency.Tests.ps1`) |
+
+## F-015 — Install and shared-folder option (Phase 5)
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-110 | Unset or blank option gives the default | `configureSharedFolder` with undefined, `''`, `'   '` | `{}` (no path, no warning); `resolveSharedFolder` gives `<USERPROFILE>\.claude-session-hub` | Auto (`plugin/hooks/paths.test.ts`: "unset or blank gives the default and no warning") |
+| TC-111 | Valid absolute path used, normalised | `' D:\Hub\ '`, `'D:/Hub//'`, `'\\srv\share\hub\'` | `/` turned to `\`, trailing slashes stripped; resolved folder equals it | Auto (`paths.test.ts`: "a valid absolute path is used with trailing slashes stripped") |
+| TC-112 | Bad option falls back with a warning | `'hub'`, `'.\hub'`, `'\hub'`, `'C:hub'`, `'C:\'`, `42` | No path; warning mentions the default folder; default folder resolved; never throws | Auto (`paths.test.ts`: "relative, root-only or non-text values fall back with a warning") |
+| TC-113 | Bus and presence paths follow the option (the archive folder is derived by `bus.ps1` from the bus path) | Configure `E:\Shared\Hub` | `bus.jsonl` and `presence\Hub.json` paths are under it | Auto (`paths.test.ts`: "bus and presence paths follow the configured folder") |
+| TC-114 | Restore drops a join from another folder | Stored join with presence path under `C:\hub`, now resolving `D:\other` | `restoreJoin` returns `dropped`, stored join cleared once, no listener or heartbeat started | Auto (`plugin/hooks/restore.test.ts`: "a stored join under a different shared folder is dropped, not restored") |
+| TC-115 | Same folder in another letter case restores | Folder `c:\HUB` against stored `C:\hub` path | `restored` | Auto (`restore.test.ts`: "the same folder in another letter case still restores") |
+| TC-116 | README install steps work | Follow `plugin/README.md` "Install (F-015)" for two accounts, with and without `sharedFolder`; give one a bad value | Both accounts show the same log path in `/hub-history`; the bad value shows the one-line warning toast at session start (wired in `register.ts`, which has no unit test) | Manual (not yet run; `docs/test-runbook.md` section 9 "Before you start" for the two-account half, section 7.5 for the bad value) |
+
+## F-016 — End-to-end proof, three accounts (Phase 5)
+
+Manual only. The user runs it with three signed-in accounts and the plugin enabled (`docs/test-runbook.md` section 9; which accounts: PM-001). None has been run.
+
+| ID | Scenario | Steps | Expected | How |
+|----|----------|-------|----------|-----|
+| TC-100 | Order, work, reply, act | Hub orders `Reports` to count the files in its working directory and reply with the count, then "done" | Reports starts a turn from `[Hub order #<id> to Reports] …`; the Hub starts a turn from `[Reply from Reports to #<id>] <count> done` and acts on it. Only the frame prefix and the `(reply with the send tool, replyTo "<id>")` line are fixed text; bodies are whatever the model wrote (examples); the count proves the work | Manual (not yet run) |
+| TC-101 | Broadcast | Hub sends to `*` with `Reports` and `Tests` joined | Both workers start a turn from `[Hub order #<id> to <name>] …` and reply; the Hub gets one `[Reply from <name> to #<id>] …` from each and does not act on its own order. Only the frame prefix and the `(reply with the send tool, replyTo "<id>")` line are fixed text; bodies are examples | Manual (not yet run) |
+| TC-102 | Unprompted worker message | A worker's model sends the Hub a message with no order to answer | The Hub starts a turn from `[Message from <name>] …` | Manual (not yet run) |
+| TC-103 | Fake order ignored | `bus.ps1 append` an `order` line with `from: Hub` and a wrong `fromSession`, then one with `from: Tests` | The worker shows `Session Hub: Ignored an order from <name>: only the Hub can give orders` and starts no turn | Manual (not yet run) |
+| TC-104 | Hub closes | Exit the Hub with `/exit` (so `session.end` runs) with both workers joined; record the method and when `presence\Hub.json` disappears | Each worker's status reads `Session Hub: <name> (worker) — Hub away — waiting` within about 10 s if Hub.json was removed at close, within about 40 s if it was still present (30 s stale `lastSeen` plus 10 s watcher tick); both stay joined | Manual (not yet run) |
+| TC-105 | Taken name refused | A third session runs `/hub-join Reports`, then `/hub-join Hub`, while both are live | `Join refused: The name "<name>" is held by a live session. Choose another name.`; Reports.json's `sessionId` is still terminal 2's session id and `name` is still `Reports` (`Get-Content …\presence\Reports.json \| ConvertFrom-Json \| Select name, sessionId`) | Manual (not yet run) |
+| TC-106 | Under 5 s | Time every message in TC-100 to TC-103 from its `bus.jsonl` line to the receiving session's turn or toast | Each under 5 s (NFR-001, FR-006) | Manual (not yet run) |
+| TC-107 | No permission prompt | Run TC-100 to TC-105 in the normal permission mode in all three accounts | No prompt in any terminal (NFR-009) | Manual (not yet run) |
+
+## Phase 4 integration (F-012 + F-013 + F-014 + F-017 + B-001 together)
+
+Everything that needs the plugin enabled in real sessions is manual and the user will run it themselves later (`docs/test-runbook.md` section 7): TC-0E2, TC-0E8, TC-0EE and TC-0F9. None has been run. Until they are, the pane, the registered commands and the model's use of `send` are **unverified** in a live session.

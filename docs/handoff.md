@@ -105,4 +105,80 @@ Messaging works end to end in code and tests. Phase 3 code is uncommitted. Gates
 
 ### What's next
 
-Phase 4: F-012 presence pane and `list_sessions`, F-013 `/hub-history`, F-014 `/hub-clear`, F-017 concurrency proof.
+Phase 4 is now built; see the Phase 4 section below.
+
+## Tranche v1 — Phase 4 (Hub tools and history): built and integrated, NOT yet live-tested (2026-11-04)
+
+### What was done
+
+- **B-001 fix.** The `send` tool is now pinned `isDeferred: false` and carries `tool.describe`. A `prompt.compose` section tells joined sessions to use it (`plugin/hooks/hub-prompt.ts`). This closes Phase 3 open point 2 (send was deferred and the model had to find it through ToolSearch). B-001 was a live failure: the Hub model used the built-in session list instead of `mcp__session-hub__send`.
+- **F-012 roster pane "Sessions" + Hub-only `list_sessions`** (`roster.ts`, `list-sessions.ts`, `roster-pane.tsx`).
+- **F-013 `/hub-history`** plus read-only `bus.ps1 last`.
+- **F-014 `/hub-clear`** plus `bus.ps1 clear`: takes the mutex, archives the log to `archive\bus-<UTC>.jsonl`, starts a new empty log, posts no notice. `tail` drains the archive by NTFS file id before moving to the new log. This completes the archive read that F-003 deferred.
+- **F-017 concurrency proof** `plugin/tests/stress/concurrency.ps1`: 10/10.
+
+### Current state
+
+All Phase 4 code is uncommitted since d332e99. The user will say when to commit. **The plugin has NOT been enabled or loaded** (user's instruction), so none of Phase 4 has been run live.
+
+Gates: tsc 0 errors; `claude plugin validate` pass with the known warnings; `claude plugin test` 174/0; Pester 47/0; stress 10/10; PS 5.1 parse 0 errors.
+
+### Tomorrow (user resumes)
+
+1. Enable the plugin.
+2. B-001 live check, TC-0E2: the Hub model must use `mcp__session-hub__send`, not the built-in session list.
+3. Runbook `docs/test-runbook.md` §7 (Phase 4).
+4. PM-002 (§5) and PM-003 (§6), including delivery within 5 s.
+
+### Open points
+
+1. The `register.ts` wiring has no unit test.
+2. In `handleSend`, `deps.sessionId()` is outside its try block.
+3. LICENSE and author are missing (plugin directory only).
+4. FR numbers differ from F numbers (e.g. F-012 is FR-011).
+5. F-012 `applyPresenceLine` can wrongly hide a row for up to 10 s after a superseded leave. Accepted.
+
+### Gotchas for agents
+
+- Pester and the stress script use the global mutex `Local\ClaudeSessionHubBus`. Run them serially and never alongside a real hub.
+- The validator wants `$` receivers as `function` declarations and atoms as same-file literal consts.
+
+### What's next
+
+Phase 5 is now built; see the Phase 5 section below.
+
+## Tranche v1 — Phase 5 (Install and three-account run): built and integrated, NOT yet live-tested (2026-11-04)
+
+### What was done
+
+- **F-015 `sharedFolder` mod option.** Declared in `plugin/.claude-plugin/plugin.json` (`userConfig`) and validated in `plugin/hooks/paths.ts`:
+  - Blank gives the default `%USERPROFILE%\.claude-session-hub`, silently.
+  - An absolute drive or UNC path is accepted; `/` becomes `\` and trailing slashes are stripped.
+  - A relative path, `C:` or `C:\` falls back to the default and shows a `session.start` toast.
+  - Every account must use the same value. A stored join from a different folder is dropped on restore.
+- **README "Install (F-015)".** Per account: set `$env:CLAUDE_CONFIG_DIR`, then `claude --plugin-dir <repo root>\plugin` (or `CLAUDE_CODE_PLUGIN_DIRS`). Set the option via `/config`, or `pluginConfigs["session-hub@inline"].options.sharedFolder` in that account's settings.json.
+- **F-016 checklist only.** `docs/test-runbook.md` §9 (TC-100..107), results table §9.8. Needs three signed-in accounts; PM-001 decides which.
+
+### Current state
+
+Phase 4 and Phase 5 are both uncommitted since d332e99. Commit messages are being drafted for the user to approve. **The plugin is still NOT enabled**, so nothing in Phases 4 or 5 has run live.
+
+Gates: tsc 0 errors; `claude plugin validate` pass with the known warnings; `claude plugin test` 180/0; Pester 47/0; stress 10/10; secret scan clean.
+
+### Tomorrow (user resumes), in this order
+
+1. Enable the plugin per README Install.
+2. B-001 live check: runbook §7.1, TC-0E2.
+3. Rest of §7, including optional §7.5.
+4. §5 (PM-002) and §6 (PM-003).
+5. §9 three-account run (PM-005).
+
+If you set a non-default shared folder, substitute it in every runbook path (each section says so).
+
+### Open points
+
+Unchanged from Phase 4 (see above), plus: the `register(on, options)` wiring and the bad-value toast can only be proven live (TC-116).
+
+### What's next
+
+After the live checks pass: close B-001, mark F-016 Done, mark Phase 5 Done, then run the Tranche v1 close-out.
