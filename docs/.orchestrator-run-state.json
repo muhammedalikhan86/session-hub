@@ -1,7 +1,7 @@
 {
-  "runId": "run-2026-11-04-03",
+  "runId": "run-2026-11-04-04",
   "startedAt": "2026-11-04",
-  "complete": true,
+  "complete": false,
   "platform": {
     "name": "Claude Code mod (TypeScript) + Windows PowerShell 5.1 helper",
     "sourceDir": "plugin",
@@ -18,39 +18,56 @@
   },
   "queue": [
     {
-      "id": "F-008",
+      "id": "B-001",
+      "type": "Bug",
+      "status": "AwaitingManualVerification",
+      "loopCount": 0,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-012",
+      "type": "Feature",
+      "status": "Done",
+      "loopCount": 3,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-013",
       "type": "Feature",
       "status": "Done",
       "loopCount": 0,
       "lastVerdict": "PASS"
     },
     {
-      "id": "F-009",
+      "id": "F-014",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
       "lastVerdict": "PASS"
     },
     {
-      "id": "F-010",
+      "id": "F-017",
       "type": "Feature",
       "status": "Done",
       "loopCount": 1,
       "lastVerdict": "PASS"
     },
     {
-      "id": "F-011",
+      "id": "F-015",
       "type": "Feature",
       "status": "Done",
-      "loopCount": 0,
+      "loopCount": 1,
+      "lastVerdict": "PASS"
+    },
+    {
+      "id": "F-016",
+      "type": "Feature",
+      "status": "ChecklistWritten_AwaitingManualRun",
+      "loopCount": 1,
       "lastVerdict": "PASS"
     }
   ],
-  "currentIndex": 4,
-  "note": "Phase 3. Sequential: all edit plugin/hooks/register.ts; F-010 needs F-008+F-009; F-011 needs F-010.",
-  "phase": "Done",
-  "integration": {
-    "loopCount": 0,
-    "lastVerdict": "PASS"
-  }
+  "currentIndex": 6,
+  "note": "B-001 bug fix (Reviewer PASS; manual verification deferred by the user to the next session), then Phase 4 sequential (F-012, F-013, F-014 all edit register.ts; F-017 needs F-014), then Phase 5 (F-015; F-016 is manual, three accounts). User: do not enable/load the plugin; that instruction remains in effect until the user tests (B-001, Phase 4 §7, F-016 §9).",
+  "phase": "Awaiting manual verification (B-001, Phase 4 §7, F-016 §9)"
 }

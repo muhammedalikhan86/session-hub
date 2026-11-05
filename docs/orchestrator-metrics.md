@@ -16,3 +16,12 @@
 | 2026-11-04 | run-2026-11-04-03 | F-010 | Feature | 1 | No | No | 0 | PASS |
 | 2026-11-04 | run-2026-11-04-03 | F-011 | Feature | 0 | No | No | 0 | PASS |
 | 2026-11-04 | run-2026-11-04-03 | Integration (Phase 3) | Integration | 0 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | B-001 | Bug | 0 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-012 | Feature | 3 | No | Yes | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-013 | Feature | 0 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-014 | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-017 | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | Integration (Phase 4) | Integration | 0 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-015 | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | F-016 (checklist only) | Feature | 1 | No | No | 0 | PASS |
+| 2026-11-04 | run-2026-11-04-04 | Integration (Phase 5) | Integration | 1 | No | No | 0 | PASS |
